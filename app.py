@@ -128,18 +128,27 @@ class TabbycatAPI:
             diagnostics['suggestion'] = 'Cannot reach Tabbycat URL. Check for typos.'
             return diagnostics
 
+        # Test tournament teams endpoint
         url = self._url('/teams')
         resp_data = self._request('GET', url)
-        status = resp_data.get('_status', 200)
+        # FIX: successful API responses are lists/dicts, not error dicts
+        if isinstance(resp_data, dict) and '_status' in resp_data:
+            status = resp_data['_status']
+        else:
+            status = 200
         diagnostics['steps'].append({
             'step': 'Tournament teams (GET /teams)',
             'status': status,
             'ok': status == 200
         })
 
+        # Test break categories endpoint
         url = self._url('/break-categories')
         resp_data = self._request('GET', url)
-        status = resp_data.get('_status', 200)
+        if isinstance(resp_data, dict) and '_status' in resp_data:
+            status = resp_data['_status']
+        else:
+            status = 200
         diagnostics['steps'].append({
             'step': 'Break categories (GET /break-categories)',
             'status': status,
