@@ -1,5 +1,5 @@
 """
-Tabbycat Break Exporter v3.0
+Tabbycat Break Exporter v3.0-C — Fuzzy metric matching + comprehensive debug.
 """
 
 import os
@@ -69,14 +69,26 @@ def _unwrap_results(data):
 
 
 def _find_metric(metrics, possible_names):
+    """Exact match first, then fuzzy match."""
     if not metrics:
-        return None
+        return None, []
+    
+    all_names = []
+    # Exact match
     lowered = [n.lower() for n in possible_names]
     for m in metrics:
         name = str(m.get("metric", "")).lower()
+        all_names.append(name)
         if name in lowered:
-            return m.get("value")
-    return None
+            return m.get("value"), all_names
+    
+    # Fuzzy match: contains "speak" or "score"
+    for m in metrics:
+        name = str(m.get("metric", "")).lower()
+        if "speak" in name or "score" in name:
+            return m.get("value"), all_names
+    
+    return None, all_names
 
 
 class TabbycatAPI:
@@ -86,7 +98,7 @@ class TabbycatAPI:
         self.slug = tournament_slug.strip("/")
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "TabbycatBreakExporter/3.0 (Render; Python requests)",
+            "User-Agent": "TabbycatBreakExporter/3.0-C (Render; Python requests)",
             "Accept": "application/json",
             "Content-Type": "application/json",
         })
@@ -255,13 +267,9 @@ def export_break_csv(api, category_slug, debate_format):
             standings_lookup[st["id"]] = st
     api._log(f"Standings lookup: {len(standings_lookup)} entries")
 
-    # Check if any breaking team has break_rank
-    has_any_break_rank = any(
-        bt.get("break_rank") is not None for bt in breaking
-    )
-    api._log(f"Has any break_rank: {has_any_break_rank}")
-
+    seq_counter = 1
     rows = []
+    
     for bt in breaking:
         team_data = bt.get("team")
         team_id = None
@@ -277,7 +285,7 @@ def export_break_csv(api, category_slug, debate_format):
             team_obj = team_lookup[team_id]
 
         if team_obj is None:
-            api._log(f"Skipping team_id={team_id}: not found in teams lookup")
+            api._log(f"Skipping team_id={team_id}: not found")
             continue
 
         team_name = (
@@ -295,19 +303,21 @@ def export_break_csv(api, category_slug, debate_format):
         st = standings_lookup.get(team_id) if team_id else None
         points = ""
         speaker_score = ""
+        all_metric_names = []
+        
         if st:
             metrics = st.get("metrics", [])
-            points = _find_metric(metrics, ["points", "wins", "team_points", "num_wins", "pts"])
-            speaker_score = _find_metric(metrics, [
+            points, _ = _find_metric(metrics, ["points", "wins", "team_points", "num_wins", "pts"])
+            speaker_score, all_metric_names = _find_metric(metrics, [
                 "speaks", "speaker_score", "total_speaker_score",
                 "average_speaker_score", "total_speaks", "avg_speaks",
                 "total", "average", "avg", "score", "spk", "speaker",
                 "total score", "speaker scores", "cumulative"
             ])
             if not speaker_score:
-                api._log(f"No speaker score metric for {team_name}. Metrics: {[m.get('metric') for m in metrics]}")
+                api._log(f"No speaker score for {team_name}. Metrics: {all_metric_names}")
         else:
-            api._log(f"No standings data for {team_name} (team_id={team_id})")
+            api._log(f"No standings for {team_name} (id={team_id})")
 
         # Fallback to team object
         if not points:
@@ -318,17 +328,13 @@ def export_break_csv(api, category_slug, debate_format):
         points_str = str(points) if points is not None else ""
         speaker_score_str = format_speaker_score(speaker_score, debate_format)
 
-        # Break rank handling
+        # Break rank
         break_rank = bt.get("break_rank")
-        remark = bt.get("remark", "")
-
-        if has_any_break_rank:
-            # API returned break_rank for at least one team
-            # Use it when available, empty when None (capped teams)
-            rank_str = ordinal(break_rank) if break_rank is not None else ""
+        if break_rank is not None:
+            rank_str = ordinal(seq_counter)
+            seq_counter += 1
         else:
-            # API does not return break_rank at all, fall back to sequential
-            rank_str = ordinal(len(rows) + 1)
+            rank_str = ""
 
         rows.append({
             "break": rank_str,
@@ -339,7 +345,7 @@ def export_break_csv(api, category_slug, debate_format):
         })
 
     if not rows:
-        return None, f"No valid data assembled. {' | '.join(api.debug_log)}", {}
+        return None, f"No valid data. {' | '.join(api.debug_log)}", {}
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -447,7 +453,7 @@ def api_export_csv_raw():
 
 @app.route("/api/debug", methods=["POST"])
 def api_debug():
-    """Debug endpoint: dumps raw API responses for troubleshooting."""
+    """Comprehensive debug: dumps raw API responses."""
     data = request.get_json()
     if not data:
         return jsonify({"ok": False, "error": "JSON body required"}), 400
@@ -466,23 +472,33 @@ def api_debug():
         "ok": True,
         "break_categories": categories,
         "matched_category": {"id": cat_id, "info": cat_info},
-        "debug_log": api.debug_log,
+        "debug_log_before": list(api.debug_log),
     }
 
     if cat_id:
+        # Raw breaking teams (first 5)
         breaking = api.get_breaking_teams(cat_id)
-        result["breaking_teams"] = breaking[:3] if breaking else []
+        result["breaking_teams_raw"] = breaking[:5] if breaking else []
         result["breaking_teams_count"] = len(breaking)
 
+        # Raw standings (first 3 with full metrics)
         standings = api.get_team_standings()
-        result["standings_sample"] = standings[:2] if standings else []
+        result["standings_raw"] = standings[:3] if standings else []
         result["standings_count"] = len(standings)
 
+        # Raw teams (first 2)
         teams = api.get_teams()
-        result["teams_sample"] = teams[:2] if teams else []
+        result["teams_raw"] = teams[:2] if teams else []
         result["teams_count"] = len(teams)
 
-    result["final_debug_log"] = api.debug_log
+        # Try to find metric names from ALL standings
+        all_metric_names = set()
+        for st in standings:
+            for m in st.get("metrics", []):
+                all_metric_names.add(m.get("metric", ""))
+        result["all_metric_names_found"] = sorted(list(all_metric_names))
+
+    result["final_debug_log"] = list(api.debug_log)
     return jsonify(result)
 
 
