@@ -1,5 +1,5 @@
 """
-Tabbycat Break Exporter v1.0 — Exports breaking teams to CSV for break slides automation.
+Tabbycat Break Exporter v1.1 — Exports breaking teams to CSV for break slides automation.
 Designed for Render Free Tier: 512MB RAM, single worker, 120s timeout.
 """
 
@@ -71,6 +71,19 @@ def extract_id_from_url(url):
     return int(match.group(1)) if match else None
 
 
+def _unwrap_results(data):
+    """
+    Tabbycat API sometimes returns paginated dicts: {"results": [...]}
+    and sometimes returns raw lists. This handles both.
+    """
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if 'results' in data:
+            return data['results']
+    return []
+
+
 # =============================================================================
 # TABBYCAT API CLIENT
 # =============================================================================
@@ -82,7 +95,7 @@ class TabbycatAPI:
         self.slug = tournament_slug.strip('/')
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'TabbycatBreakExporter/1.0 (Render; Python requests)',
+            'User-Agent': 'TabbycatBreakExporter/1.1 (Render; Python requests)',
             'Accept': 'application/json',
             'Content-Type': 'application/json'
         })
@@ -107,7 +120,7 @@ class TabbycatAPI:
                     time.sleep(2 ** attempt)
                     continue
                 else:
-                    return {'_error': f'HTTP {resp.status_code}', '_status': resp.status_code, '_text': resp.text[:300]}
+                    return {'_error': f'HTTP {resp.status_code}', '_status': resp.status_code, '_text': resp.text[:500]}
             except requests.exceptions.RequestException as e:
                 if attempt == retries - 1:
                     return {'_error': str(e), '_status': 0}
@@ -131,7 +144,6 @@ class TabbycatAPI:
         # Test tournament teams endpoint
         url = self._url('/teams')
         resp_data = self._request('GET', url)
-        # FIX: successful API responses are lists/dicts, not error dicts
         if isinstance(resp_data, dict) and '_status' in resp_data:
             status = resp_data['_status']
         else:
@@ -172,9 +184,7 @@ class TabbycatAPI:
     def get_break_categories(self):
         url = self._url('/break-categories')
         data = self._request('GET', url)
-        if isinstance(data, list):
-            return data
-        return []
+        return _unwrap_results(data)
 
     def get_break_category_by_slug(self, category_slug):
         categories = self.get_break_categories()
@@ -193,18 +203,12 @@ class TabbycatAPI:
     def get_breaking_teams(self, category_id):
         url = self._url(f'/break-categories/{category_id}/breaking/')
         data = self._request('GET', url)
-        if isinstance(data, list):
-            return data
-        return []
+        return _unwrap_results(data)
 
     def get_teams(self):
         url = self._url('/teams')
         data = self._request('GET', url)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and 'results' in data:
-            return data['results']
-        return []
+        return _unwrap_results(data)
 
 
 # =============================================================================
@@ -217,8 +221,24 @@ def export_break_csv(api, category_slug, debate_format):
         return None, f'Break category "{category_slug}" not found.', {}
 
     breaking = api.get_breaking_teams(category_id)
+    
+    # DEBUG: capture raw response for diagnostics
+    debug_url = api._url(f'/break-categories/{category_id}/breaking/')
+    raw_response = api._request('GET', debug_url)
+    
     if not breaking:
-        return None, f'No breaking teams found for "{category_slug}". Break may not be generated yet.', {}
+        # Try to give a more helpful error with debug info
+        debug_info = ''
+        if isinstance(raw_response, dict) and '_error' in raw_response:
+            debug_info = f" API error: {raw_response.get('_error')} (status {raw_response.get('_status')})"
+        elif isinstance(raw_response, (list, dict)) and len(raw_response) == 0:
+            debug_info = " The API returned an empty list."
+        
+        return None, (
+            f'No breaking teams found for "{category_slug}".{debug_info} '
+            f'In Tabbycat admin, go to Breaks → {category_slug.title()} → "Generate Break". '
+            f'If already generated, the break category slug may be different — click Test Connection to see available slugs.'
+        ), {}
 
     all_teams = api.get_teams()
     team_lookup = {}
@@ -277,7 +297,7 @@ def export_break_csv(api, category_slug, debate_format):
         })
 
     if not rows:
-        return None, 'No valid breaking team data could be assembled.', {}
+        return None, 'No valid breaking team data could be assembled. Check that teams have speakers assigned.', {}
 
     output = io.StringIO()
     writer = csv.writer(output)
