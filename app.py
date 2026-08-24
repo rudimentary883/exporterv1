@@ -1,6 +1,12 @@
 """
-Tabbycat Break Exporter v1.1 — Exports breaking teams to CSV for break slides automation.
+Tabbycat Break Exporter v2.0 — Exports breaking teams to CSV for break slides automation.
 Designed for Render Free Tier: 512MB RAM, single worker, 120s timeout.
+
+FIXES in v2.0:
+- Correct API endpoint: /break (not /breaking/)
+- Fetches team standings separately for points & speaker scores
+- Flexible metric name detection
+- Extensive debug logging
 """
 
 import os
@@ -55,11 +61,14 @@ def format_speaker_score(score, debate_format):
     BP:   remove decimal places → int
     3v3:  keep as-is (could be float or int)
     """
-    if score is None:
+    if score is None or score == '':
         return ''
-    if debate_format == 'bp':
-        return str(int(float(score)))
-    else:
+    try:
+        if debate_format == 'bp':
+            return str(int(float(score)))
+        else:
+            return str(score)
+    except (ValueError, TypeError):
         return str(score)
 
 
@@ -84,6 +93,22 @@ def _unwrap_results(data):
     return []
 
 
+def _find_metric(metrics, possible_names):
+    """
+    Find a metric value from standings metrics by trying multiple possible names.
+    metrics: list of {'metric': str, 'value': number}
+    possible_names: list of strings to try (case-insensitive)
+    """
+    if not metrics:
+        return None
+    lowered = [n.lower() for n in possible_names]
+    for m in metrics:
+        name = str(m.get('metric', '')).lower()
+        if name in lowered:
+            return m.get('value')
+    return None
+
+
 # =============================================================================
 # TABBYCAT API CLIENT
 # =============================================================================
@@ -95,12 +120,16 @@ class TabbycatAPI:
         self.slug = tournament_slug.strip('/')
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'TabbycatBreakExporter/1.1 (Render; Python requests)',
+            'User-Agent': 'TabbycatBreakExporter/2.0 (Render; Python requests)',
             'Accept': 'application/json',
             'Content-Type': 'application/json'
         })
         if self.token:
             self.session.headers['Authorization'] = f'Token {self.token}'
+        self.debug_log = []
+
+    def _log(self, msg):
+        self.debug_log.append(msg)
 
     def _url(self, path):
         return f"{self.base_url}/api/v1/tournaments/{self.slug}{path}"
@@ -115,10 +144,20 @@ class TabbycatAPI:
                     resp = self.session.post(url, json={}, timeout=30)
 
                 if resp.status_code == 200:
-                    return resp.json()
+                    try:
+                        return resp.json()
+                    except Exception as e:
+                        return {'_error': f'JSON parse error: {e}', '_status': 200, '_text': resp.text[:500]}
                 elif resp.status_code == 429:
                     time.sleep(2 ** attempt)
                     continue
+                elif resp.status_code in (301, 302, 307, 308):
+                    # Follow redirect manually for API calls
+                    redirect_url = resp.headers.get('Location', '')
+                    if redirect_url:
+                        self._log(f'Redirect: {url} → {redirect_url}')
+                        return self._request(method, redirect_url, retries=retries - attempt - 1)
+                    return {'_error': f'HTTP {resp.status_code} redirect without Location', '_status': resp.status_code}
                 else:
                     return {'_error': f'HTTP {resp.status_code}', '_status': resp.status_code, '_text': resp.text[:500]}
             except requests.exceptions.RequestException as e:
@@ -128,7 +167,7 @@ class TabbycatAPI:
         return {'_error': 'Max retries exceeded', '_status': 0}
 
     def test_connection(self):
-        diagnostics = {'ok': False, 'steps': [], 'suggestion': ''}
+        diagnostics = {'ok': False, 'steps': [], 'suggestion': '', 'debug': []}
         try:
             resp = self.session.get(self.base_url, timeout=10, allow_redirects=True)
             diagnostics['steps'].append({
@@ -191,23 +230,57 @@ class TabbycatAPI:
         for cat in categories:
             cat_url = cat.get('url', '')
             cat_id = extract_id_from_url(cat_url)
-            if category_slug.lower() in cat.get('slug', '').lower():
+            cat_slug = cat.get('slug', '')
+            cat_name = cat.get('name', '')
+            if category_slug.lower() == cat_slug.lower():
                 return cat_id, cat
-            if category_slug.lower() in cat.get('name', '').lower():
+            if category_slug.lower() in cat_name.lower():
                 return cat_id, cat
+        # Fallback: if only one category exists, return it
         if len(categories) == 1:
             cat = categories[0]
             return extract_id_from_url(cat.get('url', '')), cat
         return None, None
 
     def get_breaking_teams(self, category_id):
-        url = self._url(f'/break-categories/{category_id}/breaking/')
+        """Fetch breaking teams for a break category. Endpoint: /break (not /breaking/)"""
+        url = self._url(f'/break-categories/{category_id}/break')
         data = self._request('GET', url)
+        self._log(f'Break endpoint: {url}')
+        self._log(f'Break response type: {type(data).__name__}')
+        if isinstance(data, dict) and '_error' in data:
+            self._log(f'Break error: {data.get("_error")} status={data.get("_status")}')
+            return []
+        if isinstance(data, dict):
+            self._log(f'Break response keys: {list(data.keys())}')
+        elif isinstance(data, list):
+            self._log(f'Break response count: {len(data)}')
+            if len(data) > 0:
+                self._log(f'Break first item keys: {list(data[0].keys()) if isinstance(data[0], dict) else "not dict"}')
         return _unwrap_results(data)
 
     def get_teams(self):
         url = self._url('/teams')
         data = self._request('GET', url)
+        return _unwrap_results(data)
+
+    def get_team_standings(self):
+        """Fetch team standings to get points and speaker scores."""
+        url = self._url('/teams/standings')
+        data = self._request('GET', url)
+        self._log(f'Standings endpoint: {url}')
+        self._log(f'Standings response type: {type(data).__name__}')
+        if isinstance(data, dict) and '_error' in data:
+            self._log(f'Standings error: {data.get("_error")} status={data.get("_status")}')
+            return []
+        if isinstance(data, list) and len(data) > 0:
+            first = data[0]
+            if isinstance(first, dict):
+                self._log(f'Standings first item keys: {list(first.keys())}')
+                metrics = first.get('metrics', [])
+                if metrics:
+                    metric_names = [m.get('metric', '') for m in metrics]
+                    self._log(f'Available metrics: {metric_names}')
         return _unwrap_results(data)
 
 
@@ -216,30 +289,30 @@ class TabbycatAPI:
 # =============================================================================
 
 def export_break_csv(api, category_slug, debate_format):
+    # 1. Find break category
     category_id, category_info = api.get_break_category_by_slug(category_slug)
     if category_id is None:
-        return None, f'Break category "{category_slug}" not found.', {}
-
-    breaking = api.get_breaking_teams(category_id)
-    
-    # DEBUG: capture raw response for diagnostics
-    debug_url = api._url(f'/break-categories/{category_id}/breaking/')
-    raw_response = api._request('GET', debug_url)
-    
-    if not breaking:
-        # Try to give a more helpful error with debug info
-        debug_info = ''
-        if isinstance(raw_response, dict) and '_error' in raw_response:
-            debug_info = f" API error: {raw_response.get('_error')} (status {raw_response.get('_status')})"
-        elif isinstance(raw_response, (list, dict)) and len(raw_response) == 0:
-            debug_info = " The API returned an empty list."
-        
+        available = api.get_break_categories()
+        available_slugs = [c.get('slug', '') for c in available]
         return None, (
-            f'No breaking teams found for "{category_slug}".{debug_info} '
-            f'In Tabbycat admin, go to Breaks → {category_slug.title()} → "Generate Break". '
-            f'If already generated, the break category slug may be different — click Test Connection to see available slugs.'
+            f'Break category "{category_slug}" not found. '
+            f'Available slugs: {", ".join(available_slugs) or "none"}'
         ), {}
 
+    api._log(f'Found category: {category_info.get("name")} (id={category_id}, slug={category_info.get("slug")})')
+
+    # 2. Fetch breaking teams
+    breaking = api.get_breaking_teams(category_id)
+    if not breaking:
+        return None, (
+            f'No breaking teams found for "{category_slug}". '
+            f'Debug: {" | ".join(api.debug_log)}. '
+            f'Make sure the break has been generated in Tabbycat admin (Breaks → {category_slug.title()} → Generate Break).'
+        ), {}
+
+    api._log(f'Breaking teams count: {len(breaking)}')
+
+    # 3. Fetch all teams (for names and speakers)
     all_teams = api.get_teams()
     team_lookup = {}
     for team in all_teams:
@@ -249,13 +322,31 @@ def export_break_csv(api, category_slug, debate_format):
             team_lookup[team_id] = team
         if 'id' in team:
             team_lookup[team['id']] = team
+    api._log(f'Teams fetched: {len(all_teams)}, lookup size: {len(team_lookup)}')
 
+    # 4. Fetch team standings (for points and speaker scores)
+    standings = api.get_team_standings()
+    standings_lookup = {}
+    for st in standings:
+        team_url = st.get('team', '')
+        team_id = extract_id_from_url(team_url)
+        if team_id:
+            standings_lookup[team_id] = st
+        if 'id' in st:
+            standings_lookup[st['id']] = st
+    api._log(f'Standings fetched: {len(standings)}, lookup size: {len(standings_lookup)}')
+
+    # 5. Build CSV rows
     rows = []
+    missing_team_data = []
+    missing_standings = []
+
     for bt in breaking:
-        break_rank = bt.get('break_rank') or bt.get('rank')
+        break_rank = bt.get('break_rank')
         if break_rank is None:
             break_rank = len(rows) + 1
 
+        # Get team reference from breaking team
         team_data = bt.get('team')
         team_id = None
         team_obj = None
@@ -270,35 +361,63 @@ def export_break_csv(api, category_slug, debate_format):
             team_obj = team_lookup[team_id]
 
         if team_obj is None:
+            missing_team_data.append(f'team_id={team_id}')
             continue
 
+        # Team name
         team_name = (team_obj.get('short_name') or
                      team_obj.get('long_name') or
                      team_obj.get('reference') or
+                     team_obj.get('code_name') or
                      f'Team {team_id}')
 
+        # Speakers
         speakers = team_obj.get('speakers', [])
         speakers_str = format_speakers(speakers, debate_format)
 
-        points = bt.get('points') or bt.get('wins') or bt.get('team_points') or ''
+        # Points and speaker score from standings
+        st = standings_lookup.get(team_id) if team_id else None
+        points = ''
+        speaker_score = ''
+        if st:
+            metrics = st.get('metrics', [])
+            points = _find_metric(metrics, ['points', 'wins', 'team_points', 'num_wins'])
+            speaker_score = _find_metric(metrics, [
+                'speaks', 'speaker_score', 'total_speaker_score',
+                'average_speaker_score', 'total_speaks', 'avg_speaks'
+            ])
+        else:
+            missing_standings.append(f'team_id={team_id} ({team_name})')
 
-        speaker_score = (bt.get('speaker_score') or
-                         bt.get('total_speaker_score') or
-                         bt.get('score') or
-                         bt.get('total_score') or '')
+        # Fallback: try to get from team object directly (some Tabbycat versions include these)
+        if not points:
+            points = team_obj.get('points') or team_obj.get('wins') or ''
+        if not speaker_score:
+            speaker_score = team_obj.get('speaker_score') or team_obj.get('total_speaker_score') or ''
+
+        points_str = str(points) if points is not None else ''
         speaker_score_str = format_speaker_score(speaker_score, debate_format)
 
         rows.append({
             'break': ordinal(break_rank),
             'team': team_name,
             'speakers': speakers_str,
-            'points': points,
+            'points': points_str,
             'total_speaker_score': speaker_score_str
         })
 
-    if not rows:
-        return None, 'No valid breaking team data could be assembled. Check that teams have speakers assigned.', {}
+    if missing_team_data:
+        api._log(f'Missing team data for: {", ".join(missing_team_data[:5])}')
+    if missing_standings:
+        api._log(f'Missing standings for: {", ".join(missing_standings[:5])}')
 
+    if not rows:
+        return None, (
+            f'No valid breaking team data could be assembled. '
+            f'Debug: {" | ".join(api.debug_log)}'
+        ), {}
+
+    # 6. Generate CSV
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(['break', 'team', 'speakers', 'points', 'total_speaker_score'])
@@ -315,7 +434,8 @@ def export_break_csv(api, category_slug, debate_format):
         'category_name': category_info.get('name', category_slug) if category_info else category_slug,
         'category_slug': category_slug,
         'debate_format': debate_format,
-        'team_count': len(rows)
+        'team_count': len(rows),
+        'debug': ' | '.join(api.debug_log)
     }
 
     return output.getvalue(), None, metadata
@@ -388,7 +508,7 @@ def api_export():
     csv_data, error, metadata = export_break_csv(api, category_slug, debate_format)
 
     if error:
-        return jsonify({'ok': False, 'error': error}), 400
+        return jsonify({'ok': False, 'error': error, 'debug': metadata.get('debug', '')}), 400
 
     return jsonify({'ok': True, 'csv': csv_data, 'metadata': metadata})
 
@@ -406,7 +526,7 @@ def api_export_csv_raw():
     debate_format = data.get('debate_format', 'bp')
 
     api = TabbycatAPI(base_url, token, slug)
-    csv_data, error, _ = export_break_csv(api, category_slug, debate_format)
+    csv_data, error, metadata = export_break_csv(api, category_slug, debate_format)
 
     if error:
         return f'Error: {error}', 400
