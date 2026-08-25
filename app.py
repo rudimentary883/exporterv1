@@ -1,5 +1,5 @@
 """
-Tabbycat Break Exporter v3.0-C — Fuzzy metric matching + comprehensive debug.
+Tabbycat Break Exporter v3.1 — code_name + ALL CAPS ordinals
 """
 
 import os
@@ -17,17 +17,18 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 
 def ordinal(n):
+    """Convert integer to UPPERCASE ordinal: 1→1ST, 2→2ND, 3→3RD, 4→4TH, etc."""
     if n is None or n == "":
         return ""
     try:
         n = int(n)
     except (ValueError, TypeError):
-        return str(n)
+        return str(n).upper()
     if 10 <= n % 100 <= 20:
         suffix = "th"
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
+    return f"{n}{suffix}".upper()
 
 
 def format_speakers(speakers, debate_format):
@@ -69,25 +70,19 @@ def _unwrap_results(data):
 
 
 def _find_metric(metrics, possible_names):
-    """Exact match first, then fuzzy match."""
     if not metrics:
         return None, []
-    
-    all_names = []
-    # Exact match
     lowered = [n.lower() for n in possible_names]
+    all_names = []
     for m in metrics:
         name = str(m.get("metric", "")).lower()
         all_names.append(name)
         if name in lowered:
             return m.get("value"), all_names
-    
-    # Fuzzy match: contains "speak" or "score"
     for m in metrics:
         name = str(m.get("metric", "")).lower()
         if "speak" in name or "score" in name:
             return m.get("value"), all_names
-    
     return None, all_names
 
 
@@ -98,7 +93,7 @@ class TabbycatAPI:
         self.slug = tournament_slug.strip("/")
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "TabbycatBreakExporter/3.0-C (Render; Python requests)",
+            "User-Agent": "TabbycatBreakExporter/3.1 (Render; Python requests)",
             "Accept": "application/json",
             "Content-Type": "application/json",
         })
@@ -296,10 +291,16 @@ def export_break_csv(api, category_slug, debate_format):
             or f"Team {team_id}"
         )
 
+        # NEW: Extract code_name
+        code_name = (
+            team_obj.get("code_name")
+            or team_obj.get("short_name")
+            or ""
+        )
+
         speakers = team_obj.get("speakers", [])
         speakers_str = format_speakers(speakers, debate_format)
 
-        # Get points and speaker score from standings
         st = standings_lookup.get(team_id) if team_id else None
         points = ""
         speaker_score = ""
@@ -319,7 +320,6 @@ def export_break_csv(api, category_slug, debate_format):
         else:
             api._log(f"No standings for {team_name} (id={team_id})")
 
-        # Fallback to team object
         if not points:
             points = team_obj.get("points") or team_obj.get("wins") or ""
         if not speaker_score:
@@ -328,7 +328,6 @@ def export_break_csv(api, category_slug, debate_format):
         points_str = str(points) if points is not None else ""
         speaker_score_str = format_speaker_score(speaker_score, debate_format)
 
-        # Break rank
         break_rank = bt.get("break_rank")
         if break_rank is not None:
             rank_str = ordinal(seq_counter)
@@ -339,6 +338,7 @@ def export_break_csv(api, category_slug, debate_format):
         rows.append({
             "break": rank_str,
             "team": team_name,
+            "code_name": code_name,
             "speakers": speakers_str,
             "points": points_str,
             "total_speaker_score": speaker_score_str,
@@ -349,9 +349,17 @@ def export_break_csv(api, category_slug, debate_format):
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["break", "team", "speakers", "points", "total_speaker_score"])
+    # NEW HEADER ORDER: break, team, code_name, speakers, points, total_speaker_score
+    writer.writerow(["break", "team", "code_name", "speakers", "points", "total_speaker_score"])
     for row in rows:
-        writer.writerow([row["break"], row["team"], row["speakers"], row["points"], row["total_speaker_score"]])
+        writer.writerow([
+            row["break"],
+            row["team"],
+            row["code_name"],
+            row["speakers"],
+            row["points"],
+            row["total_speaker_score"]
+        ])
 
     metadata = {
         "category_name": category_info.get("name", category_slug) if category_info else category_slug,
@@ -453,7 +461,6 @@ def api_export_csv_raw():
 
 @app.route("/api/debug", methods=["POST"])
 def api_debug():
-    """Comprehensive debug: dumps raw API responses."""
     data = request.get_json()
     if not data:
         return jsonify({"ok": False, "error": "JSON body required"}), 400
@@ -476,22 +483,18 @@ def api_debug():
     }
 
     if cat_id:
-        # Raw breaking teams (first 5)
         breaking = api.get_breaking_teams(cat_id)
         result["breaking_teams_raw"] = breaking[:5] if breaking else []
         result["breaking_teams_count"] = len(breaking)
 
-        # Raw standings (first 3 with full metrics)
         standings = api.get_team_standings()
         result["standings_raw"] = standings[:3] if standings else []
         result["standings_count"] = len(standings)
 
-        # Raw teams (first 2)
         teams = api.get_teams()
         result["teams_raw"] = teams[:2] if teams else []
         result["teams_count"] = len(teams)
 
-        # Try to find metric names from ALL standings
         all_metric_names = set()
         for st in standings:
             for m in st.get("metrics", []):
