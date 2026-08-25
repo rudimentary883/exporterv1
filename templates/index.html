@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tabbycat Exporter — Break & Speaker Standings</title>
+    <title>Tabbycat Exporter</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -53,11 +53,6 @@
             border-color: #e94560;
             box-shadow: 0 0 0 3px rgba(233,69,96,0.1);
         }
-        .row {
-            display: flex;
-            gap: 1rem;
-        }
-        .row > div { flex: 1; }
         .btn {
             display: inline-block;
             padding: 0.7rem 1.4rem;
@@ -131,13 +126,9 @@
     <h1>Tabbycat Exporter</h1>
     <p class="subtitle">Export breaking teams and speaker standings to CSV for Google Slides generation.</p>
 
-    <!-- Shared credentials -->
+    <!-- Credentials -->
     <div class="card">
         <h2>API Credentials</h2>
-        <label for="base_url">Tabbycat Base URL</label>
-        <input type="text" id="base_url" placeholder="https://ndc2025.calicotab.com" value="https://ndc2025.calicotab.com">
-        <p class="hint">The root URL of your Tabbycat instance, e.g., <code>https://ndc2025.calicotab.com</code> or <code>https://mytournament.calicotab.com</code></p>
-
         <label for="token">Tabbycat API Token</label>
         <input type="text" id="token" placeholder="Paste your admin API token here">
         <p class="hint">Find this in Tabbycat under Setup &rarr; Configuration &rarr; API.</p>
@@ -185,7 +176,7 @@
 
         <p style="margin-top:1.2rem; font-size:0.85rem; color:#6b7280;">
             <strong>Tie rule:</strong> Includes all speakers ranked 10th or better. If ties push the list beyond 10 speakers, that's fine.
-            Anyone ranked 11th or worse is excluded. Rank numbers use ordinal formatting (1st, 2nd, 3rd).
+            Anyone ranked 11th or worse is excluded. Tied ranks use "co-" prefix (e.g., co-2nd, co-5th).
         </p>
     </div>
 
@@ -208,11 +199,7 @@
 
     <script>
         function getCreds() {
-            let base = document.getElementById("base_url").value.trim();
-            // Remove trailing slash if present
-            if (base.endsWith("/")) base = base.slice(0, -1);
             return {
-                base_url: base,
                 token: document.getElementById("token").value.trim(),
                 slug: document.getElementById("slug").value.trim()
             };
@@ -226,14 +213,14 @@
 
         // -------------------- BREAK --------------------
         async function testBreakConnection() {
-            const {base_url, token, slug} = getCreds();
+            const {token, slug} = getCreds();
             if (!token || !slug) { setStatus("break_status", "Enter token and slug first.", "err"); return; }
             setStatus("break_status", "Connecting...", "info");
             try {
                 const resp = await fetch("/test-connection", {
                     method: "POST",
                     headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({base_url, token, slug})
+                    body: new URLSearchParams({token, slug})
                 });
                 const data = await resp.json();
                 if (data.ok) {
@@ -255,14 +242,14 @@
         }
 
         function exportBreak() {
-            const {base_url, token, slug} = getCreds();
+            const {token, slug} = getCreds();
             const category_id = document.getElementById("break_category").value;
             if (!token || !slug || !category_id) { setStatus("break_status", "Select a category first.", "err"); return; }
             const form = document.createElement("form");
             form.method = "POST";
             form.action = "/export";
             form.style.display = "none";
-            [{n:"base_url",v:base_url},{n:"token",v:token},{n:"slug",v:slug},{n:"category_id",v:category_id}].forEach(f => {
+            [{n:"token",v:token},{n:"slug",v:slug},{n:"category_id",v:category_id}].forEach(f => {
                 const i = document.createElement("input");
                 i.type = "hidden"; i.name = f.n; i.value = f.v;
                 form.appendChild(i);
@@ -274,14 +261,14 @@
 
         // -------------------- SPEAKERS --------------------
         async function testSpeakerConnection() {
-            const {base_url, token, slug} = getCreds();
+            const {token, slug} = getCreds();
             if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
             setStatus("speaker_status", "Connecting...", "info");
             try {
                 const resp = await fetch("/test-speaker-connection", {
                     method: "POST",
                     headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({base_url, token, slug})
+                    body: new URLSearchParams({token, slug})
                 });
                 const data = await resp.json();
                 if (data.ok) {
@@ -303,7 +290,7 @@
         }
 
         function exportSpeakers() {
-            const {base_url, token, slug} = getCreds();
+            const {token, slug} = getCreds();
             const category_id = document.getElementById("speaker_category").value;
             const round_seq = document.getElementById("round_seq").value.trim();
             if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
@@ -311,7 +298,7 @@
             form.method = "POST";
             form.action = "/export-speakers";
             form.style.display = "none";
-            const fields = [{n:"base_url",v:base_url},{n:"token",v:token},{n:"slug",v:slug}];
+            const fields = [{n:"token",v:token},{n:"slug",v:slug}];
             if (category_id) fields.push({n:"category_id",v:category_id});
             if (round_seq) fields.push({n:"round",v:round_seq});
             fields.forEach(f => {
