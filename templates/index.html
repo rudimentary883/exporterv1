@@ -134,6 +134,10 @@
     <!-- Shared credentials -->
     <div class="card">
         <h2>API Credentials</h2>
+        <label for="base_url">Tabbycat Base URL</label>
+        <input type="text" id="base_url" placeholder="https://ndc2025.calicotab.com" value="https://ndc2025.calicotab.com">
+        <p class="hint">The root URL of your Tabbycat instance, e.g., <code>https://ndc2025.calicotab.com</code> or <code>https://mytournament.calicotab.com</code></p>
+
         <label for="token">Tabbycat API Token</label>
         <input type="text" id="token" placeholder="Paste your admin API token here">
         <p class="hint">Find this in Tabbycat under Setup &rarr; Configuration &rarr; API.</p>
@@ -204,7 +208,11 @@
 
     <script>
         function getCreds() {
+            let base = document.getElementById("base_url").value.trim();
+            // Remove trailing slash if present
+            if (base.endsWith("/")) base = base.slice(0, -1);
             return {
+                base_url: base,
                 token: document.getElementById("token").value.trim(),
                 slug: document.getElementById("slug").value.trim()
             };
@@ -218,14 +226,14 @@
 
         // -------------------- BREAK --------------------
         async function testBreakConnection() {
-            const {token, slug} = getCreds();
+            const {base_url, token, slug} = getCreds();
             if (!token || !slug) { setStatus("break_status", "Enter token and slug first.", "err"); return; }
             setStatus("break_status", "Connecting...", "info");
             try {
                 const resp = await fetch("/test-connection", {
                     method: "POST",
                     headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({token, slug})
+                    body: new URLSearchParams({base_url, token, slug})
                 });
                 const data = await resp.json();
                 if (data.ok) {
@@ -247,14 +255,14 @@
         }
 
         function exportBreak() {
-            const {token, slug} = getCreds();
+            const {base_url, token, slug} = getCreds();
             const category_id = document.getElementById("break_category").value;
             if (!token || !slug || !category_id) { setStatus("break_status", "Select a category first.", "err"); return; }
             const form = document.createElement("form");
             form.method = "POST";
             form.action = "/export";
             form.style.display = "none";
-            [{n:"token",v:token},{n:"slug",v:slug},{n:"category_id",v:category_id}].forEach(f => {
+            [{n:"base_url",v:base_url},{n:"token",v:token},{n:"slug",v:slug},{n:"category_id",v:category_id}].forEach(f => {
                 const i = document.createElement("input");
                 i.type = "hidden"; i.name = f.n; i.value = f.v;
                 form.appendChild(i);
@@ -266,14 +274,14 @@
 
         // -------------------- SPEAKERS --------------------
         async function testSpeakerConnection() {
-            const {token, slug} = getCreds();
+            const {base_url, token, slug} = getCreds();
             if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
             setStatus("speaker_status", "Connecting...", "info");
             try {
                 const resp = await fetch("/test-speaker-connection", {
                     method: "POST",
                     headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({token, slug})
+                    body: new URLSearchParams({base_url, token, slug})
                 });
                 const data = await resp.json();
                 if (data.ok) {
@@ -295,7 +303,7 @@
         }
 
         function exportSpeakers() {
-            const {token, slug} = getCreds();
+            const {base_url, token, slug} = getCreds();
             const category_id = document.getElementById("speaker_category").value;
             const round_seq = document.getElementById("round_seq").value.trim();
             if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
@@ -303,7 +311,7 @@
             form.method = "POST";
             form.action = "/export-speakers";
             form.style.display = "none";
-            const fields = [{n:"token",v:token},{n:"slug",v:slug}];
+            const fields = [{n:"base_url",v:base_url},{n:"token",v:token},{n:"slug",v:slug}];
             if (category_id) fields.push({n:"category_id",v:category_id});
             if (round_seq) fields.push({n:"round",v:round_seq});
             fields.forEach(f => {
