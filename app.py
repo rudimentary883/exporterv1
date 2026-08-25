@@ -1,25 +1,18 @@
 import os
 import csv
 import io
-import logging
 import requests
 from flask import Flask, render_template, request, jsonify, Response
-
-# Set up logging so we can see exactly what URLs are being hit
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # =============================================================================
-# CONFIG
+# CONFIG — EXACTLY AS ORIGINAL
 # =============================================================================
-# The base URL can be overridden per-request via the base_url form/JSON field.
-# If not provided, it falls back to this environment variable (or NDC default).
-DEFAULT_BASE_URL = os.environ.get("TABBYCAT_BASE_URL", "https://ndc2025.calicotab.com")
+BASE_URL = os.environ.get("TABBYCAT_BASE_URL", "https://ndc2025.calicotab.com")
 
 # =============================================================================
-# HELPERS
+# HELPERS — EXACTLY AS ORIGINAL
 # =============================================================================
 
 def _unwrap_results(data):
@@ -56,56 +49,45 @@ def _ordinal(n):
     return f"{n}{suffix}"
 
 
-def _api_get(token, base_url, path, params=None):
+def _api_get(token, path, params=None):
     """Make an authenticated GET request to the Tabbycat API."""
-    # Normalize base_url: remove trailing slash, ensure no /api/v1 suffix
-    base = base_url.rstrip("/")
-    if base.endswith("/api/v1"):
-        base = base[:-7]  # strip /api/v1
-
-    url = f"{base}{path}"
+    url = f"{BASE_URL}{path}"
     headers = {"Authorization": f"Token {token}"}
-
-    logger.info(f"API Request: {url}")
-    logger.info(f"Headers: {headers}")
-
     resp = requests.get(url, headers=headers, params=params or {}, timeout=30)
-    logger.info(f"Response status: {resp.status_code}")
     resp.raise_for_status()
     return resp.json()
 
 
 # =============================================================================
-# BREAK EXPORT (original functionality — preserved exactly)
+# BREAK EXPORT — EXACTLY AS ORIGINAL (UNTOUCHED)
 # =============================================================================
 
-def fetch_break_categories(token, base_url, slug):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/break-categories/")
+def fetch_break_categories(token, slug):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/break-categories/")
     return _unwrap_results(data)
 
 
-def fetch_breaking_teams(token, base_url, slug, category_id):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/break-categories/{category_id}/break/")
+def fetch_breaking_teams(token, slug, category_id):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/break-categories/{category_id}/break/")
     return _unwrap_results(data)
 
 
-def fetch_team_standings(token, base_url, slug):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/teams/standings/")
+def fetch_team_standings(token, slug):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/teams/standings/")
     return _unwrap_results(data)
 
 
-def build_break_csv(token, base_url, slug, category_id):
-    categories = fetch_break_categories(token, base_url, slug)
+def build_break_csv(token, slug, category_id):
+    categories = fetch_break_categories(token, slug)
     cat_name = ""
     for c in categories:
         if str(c.get("id")) == str(category_id):
             cat_name = c.get("name", "")
             break
 
-    breaking = fetch_breaking_teams(token, base_url, slug, category_id)
-    standings = fetch_team_standings(token, base_url, slug)
+    breaking = fetch_breaking_teams(token, slug, category_id)
+    standings = fetch_team_standings(token, slug)
 
-    # Build standings lookup by team URL or ID
     standings_map = {}
     for s in standings:
         team_ref = s.get("team")
@@ -116,8 +98,7 @@ def build_break_csv(token, base_url, slug, category_id):
         if team_key:
             standings_map[team_key] = s
 
-    # Fetch all teams to get speaker lists
-    teams_data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/teams/")
+    teams_data = _api_get(token, f"/api/v1/tournaments/{slug}/teams/")
     teams_list = _unwrap_results(teams_data)
     teams_map = {}
     for t in teams_list:
@@ -143,7 +124,6 @@ def build_break_csv(token, base_url, slug, category_id):
 
         team_name = team_obj.get("short_name") or team_obj.get("long_name") or team_obj.get("code_name", "")
 
-        # Speakers
         speakers = team_obj.get("speakers", [])
         speaker_names = [sp.get("name", "") for sp in speakers]
         if len(speaker_names) >= 3:
@@ -151,7 +131,6 @@ def build_break_csv(token, base_url, slug, category_id):
         else:
             speakers_str = ", ".join(speaker_names)
 
-        # Standings metrics
         st = standings_map.get(team_url) or standings_map.get(team_id)
         points = ""
         total_speaks = ""
@@ -169,7 +148,6 @@ def build_break_csv(token, base_url, slug, category_id):
                 except (ValueError, TypeError):
                     pass
 
-        # Break rank logic
         break_rank_raw = entry.get("break_rank")
         if break_rank_raw is None:
             break_rank = ""
@@ -183,47 +161,39 @@ def build_break_csv(token, base_url, slug, category_id):
 
 
 # =============================================================================
-# SPEAKER / AWARDING EXPORT (NEW)
+# SPEAKER EXPORT — NEW FEATURE ONLY (uses same BASE_URL, same _api_get)
 # =============================================================================
 
-def fetch_speaker_categories(token, base_url, slug):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/speaker-categories/")
+def fetch_speaker_categories(token, slug):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/speaker-categories/")
     return _unwrap_results(data)
 
 
-def fetch_speaker_standings(token, base_url, slug, category_id=None, round_seq=None):
+def fetch_speaker_standings(token, slug, category_id=None, round_seq=None):
     params = {}
     if category_id:
         params["category"] = category_id
     if round_seq:
         params["round"] = round_seq
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/speakers/standings/", params=params)
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/speakers/standings/", params=params)
     return _unwrap_results(data)
 
 
-def fetch_speakers(token, base_url, slug):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/speakers/")
+def fetch_speakers(token, slug):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/speakers/")
     return _unwrap_results(data)
 
 
-def fetch_teams(token, base_url, slug):
-    data = _api_get(token, base_url, f"/api/v1/tournaments/{slug}/teams/")
+def fetch_teams(token, slug):
+    data = _api_get(token, f"/api/v1/tournaments/{slug}/teams/")
     return _unwrap_results(data)
 
 
-def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
-    """
-    Export top 10+ speakers respecting tie rule:
-    - Include all speakers ranked 10 or less
-    - If ties push total beyond 10, that's fine
-    - Exclude anyone ranked 11th or worse
-    - Tied ranks get "co-" prefix: co-2nd, co-5th
-    """
-    standings = fetch_speaker_standings(token, base_url, slug, category_id, round_seq)
-    speakers = fetch_speakers(token, base_url, slug)
-    teams = fetch_teams(token, base_url, slug)
+def build_speaker_csv(token, slug, category_id=None, round_seq=None):
+    standings = fetch_speaker_standings(token, slug, category_id, round_seq)
+    speakers = fetch_speakers(token, slug)
+    teams = fetch_teams(token, slug)
 
-    # Build lookup maps
     speakers_map = {}
     for sp in speakers:
         key = sp.get("url", sp.get("id"))
@@ -236,7 +206,6 @@ def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
         if key:
             teams_map[key] = t
 
-    # Filter: rank <= 10 only
     filtered = []
     for entry in standings:
         rank = entry.get("rank")
@@ -253,7 +222,6 @@ def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
         ordinal_rank = _ordinal(rank)
         rank_str = f"co-{ordinal_rank}" if is_tied else ordinal_rank
 
-        # Get speaker info
         speaker_ref = entry.get("speaker")
         speaker_name = ""
         team_name = ""
@@ -271,7 +239,6 @@ def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
         else:
             team_ref = None
 
-        # Resolve team name
         if isinstance(team_ref, dict):
             team_url = team_ref.get("url", "")
             team_id = team_ref.get("id", "")
@@ -292,7 +259,6 @@ def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
                 team_obj.get("reference", "")
             )
 
-        # Get average metric
         metrics = entry.get("metrics", [])
         average = _find_metric(metrics, "average")
         if average is None:
@@ -315,7 +281,7 @@ def build_speaker_csv(token, base_url, slug, category_id=None, round_seq=None):
 
 
 # =============================================================================
-# FLASK ROUTES
+# FLASK ROUTES — ORIGINAL BREAK ROUTES UNTOUCHED, NEW SPEAKER ROUTES ADDED
 # =============================================================================
 
 @app.route("/")
@@ -323,19 +289,16 @@ def index():
     return render_template("index.html")
 
 
-# ---------------------------------------------------------------------------
-# BREAK ROUTES (original)
-# ---------------------------------------------------------------------------
+# --- ORIGINAL BREAK ROUTES (zero changes) ---
 
 @app.route("/test-connection", methods=["POST"])
 def test_connection():
     token = request.form.get("token", "").strip()
     slug = request.form.get("slug", "").strip()
-    base_url = request.form.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Token and slug required"}), 400
     try:
-        categories = fetch_break_categories(token, base_url, slug)
+        categories = fetch_break_categories(token, slug)
         return jsonify({"ok": True, "categories": categories})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -346,11 +309,10 @@ def export():
     token = request.form.get("token", "").strip()
     slug = request.form.get("slug", "").strip()
     category_id = request.form.get("category_id", "").strip()
-    base_url = request.form.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug or not category_id:
         return "Missing fields", 400
     try:
-        csv_data, cat_name = build_break_csv(token, base_url, slug, category_id)
+        csv_data, cat_name = build_break_csv(token, slug, category_id)
         filename = f"{slug}_break_{cat_name or category_id}.csv".replace(" ", "_")
         return Response(
             csv_data,
@@ -367,11 +329,10 @@ def api_export():
     token = data.get("token", "").strip()
     slug = data.get("slug", "").strip()
     category_id = data.get("category_id", "").strip()
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug or not category_id:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        csv_data, cat_name = build_break_csv(token, base_url, slug, category_id)
+        csv_data, cat_name = build_break_csv(token, slug, category_id)
         return jsonify({"ok": True, "csv": csv_data, "metadata": {"category": cat_name}})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -383,11 +344,10 @@ def api_export_csv():
     token = data.get("token", "").strip()
     slug = data.get("slug", "").strip()
     category_id = data.get("category_id", "").strip()
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug or not category_id:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        csv_data, _ = build_break_csv(token, base_url, slug, category_id)
+        csv_data, _ = build_break_csv(token, slug, category_id)
         return Response(csv_data, mimetype="text/csv")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -398,15 +358,14 @@ def api_debug():
     data = request.get_json(force=True) or {}
     token = data.get("token", "").strip()
     slug = data.get("slug", "").strip()
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        categories = fetch_break_categories(token, base_url, slug)
+        categories = fetch_break_categories(token, slug)
         if categories:
             cat_id = categories[0]["id"]
-            breaking = fetch_breaking_teams(token, base_url, slug, cat_id)
-            standings = fetch_team_standings(token, base_url, slug)
+            breaking = fetch_breaking_teams(token, slug, cat_id)
+            standings = fetch_team_standings(token, slug)
         else:
             breaking = []
             standings = []
@@ -420,19 +379,16 @@ def api_debug():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# ---------------------------------------------------------------------------
-# SPEAKER / AWARDING ROUTES (NEW)
-# ---------------------------------------------------------------------------
+# --- NEW SPEAKER ROUTES (added alongside originals) ---
 
 @app.route("/test-speaker-connection", methods=["POST"])
 def test_speaker_connection():
     token = request.form.get("token", "").strip()
     slug = request.form.get("slug", "").strip()
-    base_url = request.form.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Token and slug required"}), 400
     try:
-        categories = fetch_speaker_categories(token, base_url, slug)
+        categories = fetch_speaker_categories(token, slug)
         return jsonify({"ok": True, "categories": categories})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -444,11 +400,10 @@ def export_speakers():
     slug = request.form.get("slug", "").strip()
     category_id = request.form.get("category_id", "").strip() or None
     round_seq = request.form.get("round", "").strip() or None
-    base_url = request.form.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return "Missing fields", 400
     try:
-        csv_data = build_speaker_csv(token, base_url, slug, category_id, round_seq)
+        csv_data = build_speaker_csv(token, slug, category_id, round_seq)
         cat_label = category_id or "all"
         filename = f"{slug}_speakers_{cat_label}.csv".replace(" ", "_")
         return Response(
@@ -467,11 +422,10 @@ def api_export_speakers():
     slug = data.get("slug", "").strip()
     category_id = data.get("category_id") or None
     round_seq = data.get("round") or None
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        csv_data = build_speaker_csv(token, base_url, slug, category_id, round_seq)
+        csv_data = build_speaker_csv(token, slug, category_id, round_seq)
         return jsonify({"ok": True, "csv": csv_data})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -484,11 +438,10 @@ def api_export_speakers_csv():
     slug = data.get("slug", "").strip()
     category_id = data.get("category_id") or None
     round_seq = data.get("round") or None
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        csv_data = build_speaker_csv(token, base_url, slug, category_id, round_seq)
+        csv_data = build_speaker_csv(token, slug, category_id, round_seq)
         return Response(csv_data, mimetype="text/csv")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -499,12 +452,11 @@ def api_debug_speakers():
     data = request.get_json(force=True) or {}
     token = data.get("token", "").strip()
     slug = data.get("slug", "").strip()
-    base_url = data.get("base_url", "").strip() or DEFAULT_BASE_URL
     if not token or not slug:
         return jsonify({"ok": False, "error": "Missing fields"}), 400
     try:
-        categories = fetch_speaker_categories(token, base_url, slug)
-        standings = fetch_speaker_standings(token, base_url, slug)
+        categories = fetch_speaker_categories(token, slug)
+        standings = fetch_speaker_standings(token, slug)
         return jsonify({
             "ok": True,
             "categories": categories,
