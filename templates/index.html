@@ -3,312 +3,247 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tabbycat Exporter</title>
+    <title>Tabbycat Break Exporter v1.0</title>
     <style>
         * { box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 800px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 900px;
             margin: 0 auto;
-            padding: 2rem;
-            background: #f5f7fa;
-            color: #1a1a2e;
+            padding: 20px;
+            background: #f5f5f5;
             line-height: 1.6;
         }
-        h1 { color: #16213e; margin-bottom: 0.3rem; }
-        .subtitle { color: #666; margin-bottom: 2rem; font-size: 0.95rem; }
+        h1 { color: #333; margin-bottom: 5px; }
+        .subtitle { color: #666; font-size: 14px; margin-bottom: 25px; }
         .card {
-            background: #fff;
-            border-radius: 12px;
-            padding: 1.5rem 2rem;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
         }
         .card h2 {
             margin-top: 0;
-            font-size: 1.2rem;
-            color: #0f3460;
-            border-bottom: 2px solid #e94560;
-            padding-bottom: 0.5rem;
-            margin-bottom: 1.2rem;
+            font-size: 18px;
+            color: #444;
+            border-bottom: 2px solid #e0e0e0;
+            padding-bottom: 10px;
         }
         label {
             display: block;
-            margin-top: 1rem;
             font-weight: 600;
-            font-size: 0.9rem;
-            color: #333;
+            margin: 15px 0 5px;
+            color: #444;
         }
-        input[type="text"], select {
+        input[type="text"], input[type="password"], input[type="url"], select {
             width: 100%;
-            padding: 0.6rem 0.8rem;
-            margin-top: 0.3rem;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            font-size: 1rem;
-            background: #fafbfc;
+            padding: 10px 12px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 14px;
         }
-        input[type="text"]:focus, select:focus {
-            outline: none;
-            border-color: #e94560;
-            box-shadow: 0 0 0 3px rgba(233,69,96,0.1);
+        .hint {
+            font-size: 12px;
+            color: #888;
+            margin-top: 3px;
         }
         .btn {
-            display: inline-block;
-            padding: 0.7rem 1.4rem;
-            margin-top: 1.2rem;
+            background: #4a90d9;
+            color: white;
             border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 15px;
             cursor: pointer;
-            transition: all 0.15s;
+            font-weight: 600;
         }
-        .btn-primary {
-            background: #e94560;
-            color: #fff;
-        }
-        .btn-primary:hover { background: #d63a54; }
+        .btn:hover { background: #357abd; }
         .btn-secondary {
-            background: #0f3460;
-            color: #fff;
-            margin-left: 0.5rem;
+            background: #6c757d;
+            padding: 8px 16px;
+            font-size: 13px;
         }
-        .btn-secondary:hover { background: #0a2545; }
-        .status {
-            margin-top: 1rem;
-            padding: 0.8rem 1rem;
-            border-radius: 8px;
-            font-size: 0.9rem;
+        .btn-secondary:hover { background: #545b62; }
+        .btn-success { background: #28a745; }
+        .btn-success:hover { background: #218838; }
+        .test-result {
+            margin-top: 10px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 13px;
             display: none;
         }
-        .status.ok { background: #d1fae5; color: #065f46; display: block; }
-        .status.err { background: #fee2e2; color: #991b1b; display: block; }
-        .status.info { background: #dbeafe; color: #1e40af; display: block; }
-        .hint {
-            font-size: 0.85rem;
-            color: #6b7280;
-            margin-top: 0.25rem;
+        .test-result.ok { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .test-result.fail { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .test-result.info { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        .flash-messages { margin-bottom: 20px; }
+        .flash {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 10px;
         }
-        .divider {
-            text-align: center;
-            margin: 2rem 0;
-            color: #9ca3af;
-            font-size: 0.9rem;
-            position: relative;
+        .flash.error { background: #f8d7da; color: #721c24; }
+        .flash.info { background: #d1ecf1; color: #0c5460; }
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
         }
-        .divider::before, .divider::after {
-            content: "";
-            position: absolute;
-            top: 50%;
-            width: 35%;
-            height: 1px;
-            background: #e5e7eb;
-        }
-        .divider::before { left: 0; }
-        .divider::after { right: 0; }
-        code {
-            background: #f3f4f6;
-            padding: 0.15rem 0.4rem;
+        .format-badge {
+            display: inline-block;
+            padding: 2px 8px;
             border-radius: 4px;
-            font-size: 0.9em;
+            font-size: 11px;
+            font-weight: 600;
+            margin-left: 8px;
         }
-        .endpoint-list {
-            font-size: 0.85rem;
-            color: #4b5563;
-            margin-top: 0.5rem;
+        .badge-bp { background: #e3f2fd; color: #1565c0; }
+        .badge-3v3 { background: #f3e5f5; color: #7b1fa2; }
+        .api-info {
+            background: #f8f9fa;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+            font-size: 13px;
         }
-        .endpoint-list li { margin: 0.2rem 0; }
+        .api-info code {
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        @media (max-width: 600px) {
+            .two-col { grid-template-columns: 1fr; }
+        }
     </style>
-<base target="_blank">
 </head>
 <body>
-    <h1>Tabbycat Exporter</h1>
-    <p class="subtitle">Export breaking teams and speaker standings to CSV for Google Slides generation.</p>
+    <h1>Tabbycat Break Exporter <span style="font-size:14px;color:#888;">v1.0</span></h1>
+    <p class="subtitle">Export breaking teams to CSV for automated break slides</p>
 
-    <!-- Credentials -->
-    <div class="card">
-        <h2>API Credentials</h2>
-        <label for="token">Tabbycat API Token</label>
-        <input type="text" id="token" placeholder="Paste your admin API token here">
-        <p class="hint">Find this in Tabbycat under Setup &rarr; Configuration &rarr; API.</p>
-
-        <label for="slug">Tournament Slug</label>
-        <input type="text" id="slug" placeholder="e.g., ndc2025" value="ndc2025">
-        <p class="hint">The part of the URL after the domain, e.g., <code>ndc2025</code> in <code>.../ndc2025/admin/...</code></p>
-    </div>
-
-    <!-- BREAK EXPORT -->
-    <div class="card">
-        <h2>1. Break Export</h2>
-        <label for="break_category">Break Category</label>
-        <select id="break_category">
-            <option value="">-- Click "Test Connection" to load categories --</option>
-        </select>
-
-        <div>
-            <button class="btn btn-secondary" onclick="testBreakConnection()">Test Connection</button>
-            <button class="btn btn-primary" onclick="exportBreak()">Export Break CSV</button>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-messages">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
         </div>
-        <div id="break_status" class="status"></div>
-    </div>
+      {% endif %}
+    {% endwith %}
 
-    <div class="divider">OR</div>
+    <form action="/export" method="POST">
+        <div class="card">
+            <h2>1. Tabbycat Connection</h2>
+            <div class="two-col">
+                <div>
+                    <label for="base_url">Tabbycat URL</label>
+                    <input type="url" name="base_url" id="base_url" placeholder="https://ndc2025.calicotab.com" required>
+                    <p class="hint">Full site URL (no trailing slash)</p>
+                </div>
+                <div>
+                    <label for="slug">Tournament Slug</label>
+                    <input type="text" name="slug" id="slug" placeholder="ndc2025" required>
+                    <p class="hint">The part after the URL slash</p>
+                </div>
+            </div>
 
-    <!-- SPEAKER / AWARDING EXPORT -->
-    <div class="card">
-        <h2>2. Speaker Standings Export (Awarding Slides)</h2>
-        <label for="speaker_category">Speaker Category</label>
-        <select id="speaker_category">
-            <option value="">-- Click "Test Speaker Connection" to load categories --</option>
-        </select>
-        <p class="hint">Leave empty to export the open division (all speakers). Select a category like "Union Cup" for filtered standings.</p>
+            <label for="token">API Token</label>
+            <input type="text" name="token" id="token" placeholder="abc123def456..." required>
+            <p class="hint">Found on your Tabbycat "Change Password" page. Long random string.</p>
 
-        <label for="round_seq">Round (optional)</label>
-        <input type="text" id="round_seq" placeholder="e.g., 14">
-        <p class="hint">Sequence number of the last round to include. Leave blank for current standings.</p>
-
-        <div>
-            <button class="btn btn-secondary" onclick="testSpeakerConnection()">Test Speaker Connection</button>
-            <button class="btn btn-primary" onclick="exportSpeakers()">Export Speaker CSV</button>
+            <div style="margin-top:15px;">
+                <button type="button" class="btn btn-secondary" onclick="testConnection()">Test Connection</button>
+            </div>
+            <div id="test_result" class="test-result"></div>
         </div>
-        <div id="speaker_status" class="status"></div>
 
-        <p style="margin-top:1.2rem; font-size:0.85rem; color:#6b7280;">
-            <strong>Tie rule:</strong> Includes all speakers ranked 10th or better. If ties push the list beyond 10 speakers, that's fine.
-            Anyone ranked 11th or worse is excluded. Tied ranks use "co-" prefix (e.g., co-2nd, co-5th).
-        </p>
-    </div>
+        <div class="card">
+            <h2>2. Break Category & Format</h2>
+            <div class="two-col">
+                <div>
+                    <label for="category_slug">Break Category Slug</label>
+                    <input type="text" name="category_slug" id="category_slug" placeholder="open" value="open" required>
+                    <p class="hint">e.g., <code>open</code>, <code>unioncup</code>, <code>esl</code>, <code>novice</code></p>
+                </div>
+                <div>
+                    <label for="debate_format">Debate Format</label>
+                    <select name="debate_format" id="debate_format">
+                        <option value="bp">British Parliamentary (BP)</option>
+                        <option value="3v3">3v3 / WSDC / UADC / Australs</option>
+                    </select>
+                    <p class="hint">Controls speaker formatting & score decimals</p>
+                </div>
+            </div>
+        </div>
 
-    <!-- API ENDPOINTS -->
-    <div class="card">
-        <h2>API Endpoints</h2>
-        <ul class="endpoint-list">
-            <li><code>POST /test-connection</code> — Test break API, list break categories</li>
-            <li><code>POST /export</code> — Form break CSV download</li>
-            <li><code>POST /api/export</code> — JSON break export</li>
-            <li><code>POST /api/export-csv</code> — Raw break CSV text</li>
-            <li><code>POST /test-speaker-connection</code> — Test speaker API, list speaker categories</li>
-            <li><code>POST /export-speakers</code> — Form speaker CSV download</li>
-            <li><code>POST /api/export-speakers</code> — JSON speaker export</li>
-            <li><code>POST /api/export-speakers-csv</code> — Raw speaker CSV text</li>
-            <li><code>POST /api/debug</code> — Debug break responses</li>
-            <li><code>POST /api/debug-speakers</code> — Debug speaker responses</li>
-        </ul>
+        <div class="card" style="text-align:center;">
+            <button type="submit" class="btn btn-success" style="font-size:16px;padding:14px 32px;">
+                📥 Export Break CSV
+            </button>
+        </div>
+    </form>
+
+    <div class="card api-info">
+        <h2>🔗 API Endpoints (for Apps Script / automation)</h2>
+        <p><strong>POST</strong> <code>/api/export</code> — Returns JSON with <code>csv</code> field</p>
+        <p><strong>POST</strong> <code>/api/export-csv</code> — Returns raw CSV text</p>
+        <p style="margin-top:10px;">Both accept the same JSON body:</p>
+        <pre style="background:#e9ecef;padding:10px;border-radius:4px;overflow-x:auto;">{
+  "base_url": "https://ndc2025.calicotab.com",
+  "token": "your_api_token",
+  "slug": "ndc2025",
+  "category_slug": "open",
+  "debate_format": "bp"
+}</pre>
     </div>
 
     <script>
-        function getCreds() {
-            return {
-                token: document.getElementById("token").value.trim(),
-                slug: document.getElementById("slug").value.trim()
+        async function testConnection() {
+            const resultDiv = document.getElementById('test_result');
+            resultDiv.style.display = 'block';
+            resultDiv.className = 'test-result info';
+            resultDiv.textContent = 'Testing connection...';
+
+            const payload = {
+                base_url: document.getElementById('base_url').value,
+                token: document.getElementById('token').value,
+                slug: document.getElementById('slug').value
             };
-        }
 
-        function setStatus(id, text, type) {
-            const el = document.getElementById(id);
-            el.textContent = text;
-            el.className = "status " + (type || "info");
-        }
-
-        // -------------------- BREAK --------------------
-        async function testBreakConnection() {
-            const {token, slug} = getCreds();
-            if (!token || !slug) { setStatus("break_status", "Enter token and slug first.", "err"); return; }
-            setStatus("break_status", "Connecting...", "info");
             try {
-                const resp = await fetch("/test-connection", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({token, slug})
+                const resp = await fetch('/test-connection', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
                 });
                 const data = await resp.json();
+
                 if (data.ok) {
-                    const sel = document.getElementById("break_category");
-                    sel.innerHTML = "";
-                    data.categories.forEach(c => {
-                        const opt = document.createElement("option");
-                        opt.value = c.id;
-                        opt.textContent = c.name + " (" + c.slug + ")";
-                        sel.appendChild(opt);
-                    });
-                    setStatus("break_status", "Connected! Found " + data.categories.length + " break categories.", "ok");
+                    resultDiv.className = 'test-result ok';
+                    let html = `<strong>✅ Connection successful!</strong><br>${data.suggestion}`;
+                    if (data.break_categories && data.break_categories.length > 0) {
+                        html += '<br><br><strong>Available break categories:</strong><ul>';
+                        for (const cat of data.break_categories) {
+                            html += `<li><code>${cat.slug}</code> — ${cat.name}</li>`;
+                        }
+                        html += '</ul>';
+                    }
+                    resultDiv.innerHTML = html;
                 } else {
-                    setStatus("break_status", "Error: " + (data.error || "Unknown"), "err");
+                    resultDiv.className = 'test-result fail';
+                    let html = `<strong>❌ Connection failed</strong><br>${data.suggestion}<br><br><strong>Steps:</strong><ul>`;
+                    for (const step of data.steps || []) {
+                        html += `<li>${step.step}: HTTP ${step.status} ${step.ok ? '✓' : '✗'}</li>`;
+                    }
+                    html += '</ul>';
+                    resultDiv.innerHTML = html;
                 }
             } catch (e) {
-                setStatus("break_status", "Error: " + e.message, "err");
+                resultDiv.className = 'test-result fail';
+                resultDiv.textContent = 'Network error: ' + e.message;
             }
-        }
-
-        function exportBreak() {
-            const {token, slug} = getCreds();
-            const category_id = document.getElementById("break_category").value;
-            if (!token || !slug || !category_id) { setStatus("break_status", "Select a category first.", "err"); return; }
-            const form = document.createElement("form");
-            form.method = "POST";
-            form.action = "/export";
-            form.style.display = "none";
-            [{n:"token",v:token},{n:"slug",v:slug},{n:"category_id",v:category_id}].forEach(f => {
-                const i = document.createElement("input");
-                i.type = "hidden"; i.name = f.n; i.value = f.v;
-                form.appendChild(i);
-            });
-            document.body.appendChild(form);
-            form.submit();
-            setStatus("break_status", "Download started...", "ok");
-        }
-
-        // -------------------- SPEAKERS --------------------
-        async function testSpeakerConnection() {
-            const {token, slug} = getCreds();
-            if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
-            setStatus("speaker_status", "Connecting...", "info");
-            try {
-                const resp = await fetch("/test-speaker-connection", {
-                    method: "POST",
-                    headers: {"Content-Type": "application/x-www-form-urlencoded"},
-                    body: new URLSearchParams({token, slug})
-                });
-                const data = await resp.json();
-                if (data.ok) {
-                    const sel = document.getElementById("speaker_category");
-                    sel.innerHTML = '<option value="">-- All speakers (open) --</option>';
-                    data.categories.forEach(c => {
-                        const opt = document.createElement("option");
-                        opt.value = c.id;
-                        opt.textContent = c.name + " (" + c.slug + ")";
-                        sel.appendChild(opt);
-                    });
-                    setStatus("speaker_status", "Connected! Found " + data.categories.length + " speaker categories.", "ok");
-                } else {
-                    setStatus("speaker_status", "Error: " + (data.error || "Unknown"), "err");
-                }
-            } catch (e) {
-                setStatus("speaker_status", "Error: " + e.message, "err");
-            }
-        }
-
-        function exportSpeakers() {
-            const {token, slug} = getCreds();
-            const category_id = document.getElementById("speaker_category").value;
-            const round_seq = document.getElementById("round_seq").value.trim();
-            if (!token || !slug) { setStatus("speaker_status", "Enter token and slug first.", "err"); return; }
-            const form = document.createElement("form");
-            form.method = "POST";
-            form.action = "/export-speakers";
-            form.style.display = "none";
-            const fields = [{n:"token",v:token},{n:"slug",v:slug}];
-            if (category_id) fields.push({n:"category_id",v:category_id});
-            if (round_seq) fields.push({n:"round",v:round_seq});
-            fields.forEach(f => {
-                const i = document.createElement("input");
-                i.type = "hidden"; i.name = f.n; i.value = f.v;
-                form.appendChild(i);
-            });
-            document.body.appendChild(form);
-            form.submit();
-            setStatus("speaker_status", "Download started...", "ok");
         }
     </script>
 </body>
