@@ -1,4 +1,11 @@
 """
+Tabbycat Break Exporter v3.5
+  * v3.5: break export keeps the order of Tabbycat's admin break table (the standings RANK), also for teams that are not
+          breaking. Their remark (Capped / Ineligible / Reserve / Withdrawn ...) goes into the "break" column and the
+          separate remark column is gone (break AND awards exports).
+          + optional text next to the values (for Canva bulk create): suffix_break, suffix_points, suffix_score,
+            suffix_average  ->  "1ST OPEN BREAKING TEAM", "19 Team Points", "1125 Speaker Points", "81.50 average speaks"
+          - speakers are no longer flagged as anonymous in the awards export
 Tabbycat Break Exporter v3.4
   * v3.4: + AWARDING export ("export_type": "awards"): the top speakers of the open speaker tab, of any speaker category
           (e.g. unioncup) and - for 3v3 / WSDC - of the reply speaker tab. Columns: rank, speaker, team, average
@@ -62,18 +69,15 @@ FORMAT_CONFIG = {
         "headers": ["break", "team", "code_name", "speakers", "wins", "average_total_speaker_score"],
     },
 }
-# Extra last column with Tabbycat's remark for teams that did not break (Withdrawn, Reserve, Capped ...).
-# Set to False to leave it out.
-INCLUDE_REMARK_COLUMN = True
 # Columns that are never filled on an "intro" row (it only carries the break rank and the numbers)
-INTRO_BLANK_COLUMNS = {"team", "code_name", "speakers", "remark"}
+INTRO_BLANK_COLUMNS = {"team", "code_name", "speakers"}
 ATSS_DECIMALS = 2
 
 # ---------------------------------------------------------------------------------------------------------------
 # Awarding slides (speaker tabs). The column names are the slide placeholders: {{rank}} {{speaker}} {{team}} {{average}}
 # ---------------------------------------------------------------------------------------------------------------
 AWARD_HEADERS = ["rank", "speaker", "team", "average"]
-AWARD_INTRO_BLANK = {"speaker", "team", "remark"}       # not filled on an intro row
+AWARD_INTRO_BLANK = {"speaker", "team"}                 # not filled on an intro row
 AWARD_TOP_N = 10                                        # everybody ranked <= this number is exported (ties included)
 AWARD_AVG_DECIMALS = 2
 AWARD_MARK_TIES = False                                 # True -> tied speakers read "3RD=" instead of "3RD"
@@ -103,7 +107,7 @@ def normalize_format(value):
 
 
 def headers_for(fmt):
-    return FORMAT_CONFIG[fmt]["headers"] + (["remark"] if INCLUDE_REMARK_COLUMN else [])
+    return list(FORMAT_CONFIG[fmt]["headers"])
 
 
 # Names Tabbycat may use for the new metrics (compared after lower-casing and turning spaces/dashes into "_")
@@ -153,8 +157,52 @@ def format_speaker_score(score, debate_format):
         return str(score)
 
 
+# CSV column -> which optional text box feeds it. The text is added directly in the cell, after the value
+# ("19" -> "19 Team Points"), on the intro rows too. Empty cells never get text.
+SUFFIX_FIELDS = {
+    "break": "break",
+    "points": "points", "wins": "points",
+    "total_speaker_score": "score", "average_total_speaker_score": "score",
+    "average": "average",
+}
+SUFFIX_KEYS = ("break", "points", "score", "average")
+
+
+def clean_suffixes(params):
+    """Pick the four optional texts out of a form / JSON dict (flat 'suffix_x' keys or a 'suffixes' dict)."""
+    nested = params.get("suffixes") if isinstance(params.get("suffixes"), dict) else {}
+    out = {}
+    for key in SUFFIX_KEYS:
+        raw = params.get(f"suffix_{key}")
+        if raw in (None, ""):
+            raw = nested.get(key)
+        text = " ".join(str(raw or "").split())            # one line, trimmed, single spaces
+        if text:
+            out[key] = text
+    return out
+
+
+def with_suffix(value, text):
+    value = "" if value is None else str(value)
+    return f"{value} {text}" if value != "" and text else value
+
+
+def apply_suffixes(headers, values, suffixes, is_breaking=True):
+    """values: list in header order -> same list with the optional texts added."""
+    if not suffixes:
+        return values
+    result = []
+    for header, value in zip(headers, values):
+        key = SUFFIX_FIELDS.get(header)
+        text = suffixes.get(key) if key else None
+        if key == "break" and not is_breaking:              # "Capped" / "Withdrawn" ... never get "OPEN BREAKING TEAM"
+            text = None
+        result.append(with_suffix(value, text))
+    return result
+
+
 def award_headers():
-    return AWARD_HEADERS + (["remark"] if INCLUDE_REMARK_COLUMN else [])
+    return list(AWARD_HEADERS)
 
 
 def parse_rank(value):
@@ -645,10 +693,11 @@ class TabbycatAPI:
         return result
 
 
-def export_break_csv(api, category_slug, debate_format, intro_rows=True):
+def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixes=None):
     fmt = normalize_format(debate_format)
     headers = headers_for(fmt)
     low, high = FORMAT_CONFIG[fmt]["expected_speakers"]
+    suffixes = suffixes or {}
 
     category_id, category_info = api.get_break_category_by_slug(category_slug)
 
@@ -663,11 +712,6 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
     if not breaking:
         return None, f'No breaking teams found for "{category_slug}". {" | ".join(api.debug_log)}', {}
 
-    # Order = Tabbycat's BREAK column (break_rank), never the standings "Rank" column.
-    # Teams without a break rank (withdrawn / reserve / capped ...) are kept, after the ranked teams, in their original order.
-    breaking = sorted(breaking, key=lambda bt: (rank_number(bt.get("break_rank")) is None,
-                                                rank_number(bt.get("break_rank")) or 0))
-
     all_teams = api.get_teams()
     team_lookup = {}
     for team in all_teams:
@@ -680,13 +724,40 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
 
     standings = api.get_team_standings()
     standings_lookup = {}
-    for st in standings:
+    standings_position = {}                       # team id -> standings rank (or position) = fallback for the order
+    for position, st in enumerate(standings, start=1):
         tid = extract_id_from_url(st.get("team", ""))
         if tid:
             standings_lookup[tid] = st
+            standings_position[tid] = rank_number(st.get("rank")) or position
         if "id" in st:
             standings_lookup[st["id"]] = st
     api._log(f"Standings lookup: {len(standings_lookup)} entries")
+
+    def team_id_of(bt):
+        team_data = bt.get("team")
+        if isinstance(team_data, dict):
+            return team_data.get("id") or extract_id_from_url(team_data.get("url", ""))
+        if isinstance(team_data, str):
+            return extract_id_from_url(team_data)
+        return None
+
+    def standing_rank(bt):
+        """The RANK column of Tabbycat's break table (fallback: the team's standings rank)."""
+        rank = rank_number(bt.get("rank"))
+        if rank is None:
+            rank = standings_position.get(team_id_of(bt))
+        return rank
+
+    # Order = the admin break table: by the standings RANK. Teams that are not breaking (capped, ineligible, reserve,
+    # withdrawn ...) stay where their rank puts them. Same rank -> the team with the better break rank first.
+    indexed = list(enumerate(breaking))
+    indexed.sort(key=lambda pair: (standing_rank(pair[1]) is None, standing_rank(pair[1]) or 0,
+                                   rank_number(pair[1].get("break_rank")) is None,
+                                   rank_number(pair[1].get("break_rank")) or 0, pair[0]))
+    breaking = [bt for _, bt in indexed]
+    if all(standing_rank(bt) is None for bt in breaking):
+        api._log("No standings rank available for the breaking teams: ordered by break rank, others after them")
 
     rows = []
     metric_found = {}
@@ -694,14 +765,8 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
 
     for bt in breaking:
         team_data = bt.get("team")
-        team_id = None
-        team_obj = None
-
-        if isinstance(team_data, dict):
-            team_obj = team_data
-            team_id = team_data.get("id") or extract_id_from_url(team_data.get("url", ""))
-        elif isinstance(team_data, str):
-            team_id = extract_id_from_url(team_data)
+        team_id = team_id_of(bt)
+        team_obj = team_data if isinstance(team_data, dict) else None
 
         if team_obj is None and team_id and team_id in team_lookup:
             team_obj = team_lookup[team_id]
@@ -739,12 +804,14 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
         for header, ok in found.items():
             metric_found[header] = metric_found.get(header, False) or ok
 
-        # "Break" column: the break rank exactly as Tabbycat shows it (not re-counted, not the standings rank)
+        # "break" column = the Break column of Tabbycat's table: the break rank (1ST, 2ND ...) for a breaking team,
+        # otherwise its remark (Capped / Ineligible / Reserve / Withdrawn ...)
         break_rank = bt.get("break_rank")
-        rank_str = ordinal(break_rank) if break_rank is not None and break_rank != "" else ""
+        is_breaking = break_rank is not None and break_rank != ""
+        break_text = ordinal(break_rank) if is_breaking else remark_label(bt.get("remark"))
 
-        row = {"break": rank_str, "team": team_name, "code_name": code_name, "speakers": speakers_str,
-               "remark": remark_label(bt.get("remark"))}
+        row = {"break": break_text, "team": team_name, "code_name": code_name, "speakers": speakers_str,
+               "_breaking": is_breaking}
         row.update(values)
         rows.append(row)
 
@@ -762,36 +829,41 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
     writer.writerow(headers)
     intro_count = 0
     for row in rows:
+        full = [row.get(h, "") for h in headers]
         # "intro" row = same break rank + numbers, but no team / code_name / speakers.
-        # Only for teams that really have a break rank (not for withdrawn / reserve / capped teams).
-        if intro_rows and row["break"]:
-            writer.writerow([("" if h in INTRO_BLANK_COLUMNS else row.get(h, "")) for h in headers])
+        # Only for teams that really break (not for capped / ineligible / reserve / withdrawn teams).
+        if intro_rows and row["_breaking"]:
+            intro = [("" if h in INTRO_BLANK_COLUMNS else row.get(h, "")) for h in headers]
+            writer.writerow(apply_suffixes(headers, intro, suffixes, True))
             intro_count += 1
-        writer.writerow([row.get(h, "") for h in headers])
+        writer.writerow(apply_suffixes(headers, full, suffixes, row["_breaking"]))
 
     metadata = {
+        "export_type": "break",
         "category_name": category_info.get("name", category_slug) if category_info else category_slug,
         "category_slug": category_slug,
         "debate_format": fmt,
         "columns": headers,
         "team_count": len(rows),
-        "ranked_teams": sum(1 for r in rows if r["break"]),
-        "unranked_teams": sum(1 for r in rows if not r["break"]),
+        "breaking_teams": sum(1 for r in rows if r["_breaking"]),
+        "not_breaking_teams": sum(1 for r in rows if not r["_breaking"]),
         "intro_rows": intro_count,
         "row_count": len(rows) + intro_count,
+        "text_added_to": sorted(suffixes),
         "missing_metrics": missing,
         "debug": " | ".join(api.debug_log),
     }
     return output.getvalue(), None, metadata
 
 
-def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWARD_TOP_N):
+def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWARD_TOP_N, suffixes=None):
     """
-    Top speakers of one speaker tab -> CSV with the columns rank, speaker, team, average (+ remark).
+    Top speakers of one speaker tab -> CSV with the columns rank, speaker, team, average.
     award_tab: 'open' (main speaker tab) | a speaker-category slug such as 'unioncup' | 'replies' (3v3 / WSDC only).
     Everybody whose rank is <= top_n is exported, so ties at the cut-off can make the list longer than top_n.
     """
     fmt = normalize_format(debate_format)
+    suffixes = suffixes or {}
     tab = re.sub(r"[^a-z0-9_]+", "_", str(award_tab or "open").strip().lower()).strip("_") or "open"
     is_reply = tab in REPLY_TAB_NAMES
     is_open = tab in OPEN_TAB_NAMES
@@ -892,7 +964,6 @@ def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWAR
         out_rows.append({
             "rank": rank_text, "speaker": sp.get("name", ""), "team": team_name,
             "average": format_fixed(r["average"], AWARD_AVG_DECIMALS),
-            "remark": "Anonymous" if sp.get("anonymous") else "",
         })
 
     output = io.StringIO()
@@ -901,9 +972,10 @@ def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWAR
     intro_count = 0
     for row in out_rows:
         if intro_rows:
-            writer.writerow([("" if h in AWARD_INTRO_BLANK else row.get(h, "")) for h in headers])
+            intro = [("" if h in AWARD_INTRO_BLANK else row.get(h, "")) for h in headers]
+            writer.writerow(apply_suffixes(headers, intro, suffixes))
             intro_count += 1
-        writer.writerow([row.get(h, "") for h in headers])
+        writer.writerow(apply_suffixes(headers, [row.get(h, "") for h in headers], suffixes))
 
     missing_avg = sum(1 for r in out_rows if r["average"] == "")
     if missing_avg:
@@ -914,7 +986,7 @@ def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWAR
         "debate_format": fmt, "columns": headers, "top_n": top_n,
         "speakers_in_tab": len(rows), "exported_speakers": len(out_rows),
         "ties_at_cutoff": len(out_rows) > top_n,
-        "anonymous_speakers": [r["speaker"] for r in out_rows if r["remark"]],
+        "text_added_to": sorted(suffixes),
         "intro_rows": intro_count, "row_count": len(out_rows) + intro_count,
         "missing_metrics": ["average"] if missing_avg else [],
         "debug": " | ".join(api.debug_log),
@@ -926,13 +998,14 @@ def run_export(api, params):
     """One entry point for the form and the JSON endpoints. -> (csv_text, error, metadata, filename_suffix)"""
     export_type = str(params.get("export_type") or "break").strip().lower()
     intro_rows = _intro_flag(params.get("intro_rows"))
+    suffixes = clean_suffixes(params)
     fmt = normalize_format(params.get("debate_format", "bp"))
     if export_type in ("awards", "award", "speakers"):
         tab = str(params.get("award_tab") or "open").strip().lower()
-        csv_text, error, meta = export_awards_csv(api, tab, fmt, intro_rows, params.get("top_n") or AWARD_TOP_N)
+        csv_text, error, meta = export_awards_csv(api, tab, fmt, intro_rows, params.get("top_n") or AWARD_TOP_N, suffixes)
         return csv_text, error, meta, f"{re.sub(r'[^a-z0-9_]+', '_', tab) or 'open'}_awards"
     category_slug = str(params.get("category_slug") or "").strip().lower()
-    csv_text, error, meta = export_break_csv(api, category_slug, fmt, intro_rows)
+    csv_text, error, meta = export_break_csv(api, category_slug, fmt, intro_rows, suffixes)
     return csv_text, error, meta, f"{category_slug}_break"
 
 
@@ -990,6 +1063,11 @@ def _clean_params(source):
         "top_n": source.get("top_n"),
         "debate_format": source.get("debate_format", "bp"),
         "intro_rows": source.get("intro_rows"),
+        "suffix_break": source.get("suffix_break"),
+        "suffix_points": source.get("suffix_points"),
+        "suffix_score": source.get("suffix_score"),
+        "suffix_average": source.get("suffix_average"),
+        "suffixes": source.get("suffixes"),
     }
 
 
@@ -1013,8 +1091,6 @@ def export():
     response = send_file(buffer, mimetype="text/csv", as_attachment=True, download_name=filename)
     if metadata.get("missing_metrics"):
         response.headers["X-Missing-Metrics"] = ",".join(metadata["missing_metrics"])
-    if metadata.get("anonymous_speakers"):
-        response.headers["X-Anonymous-Speakers"] = str(len(metadata["anonymous_speakers"]))
     return response
 
 
