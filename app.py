@@ -1,4 +1,16 @@
 """
+Tabbycat Break Exporter v3.4
+  * v3.4: + AWARDING export ("export_type": "awards"): the top speakers of the open speaker tab, of any speaker category
+          (e.g. unioncup) and - for 3v3 / WSDC - of the reply speaker tab. Columns: rank, speaker, team, average
+          (+ the same "intro" rows as the break export: rank + average only, speaker and team blank).
+          Ties: everybody with rank <= 10 is included (a 4-way tie for 8th gives 12 speakers, the 12th-ranked is left out).
+Tabbycat Break Exporter v3.3
+  * v3.3: one profile per debate format (see FORMAT_CONFIG)
+          BP    : points, total speaker score, 1sts, 2nds, draw strength by wins       (speakers joined by " & ")
+          3v3   : wins, total speaker score                                            (speakers joined by ", ")  AP / Australs / UADC
+          WSDC  : wins, average total speaker score (ATSS)                             (speakers joined by ", ")  3-5 speakers
+          + the "break" column now follows Tabbycat's Break column (break_rank), never the standings Rank
+          + teams that did not break (withdrawn / reserve / capped ...) are still exported, with their remark
 Tabbycat Break Exporter v3.2
   * v3.1: code_name column + ALL CAPS ordinals
   * v3.2: + number_of_1sts, number_of_2nds, draw_strength_by_wins (after total_speaker_score)
@@ -16,7 +28,9 @@ import io
 import csv
 import time
 import re
+import bisect
 import requests
+from collections import Counter
 
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, jsonify
 
@@ -24,17 +38,84 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "tabbycat-break-exporter-key-2026")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
-# Column order of the exported CSV. Rename a header here if your Google Sheet / Apps Script expects other names.
-CSV_HEADERS = [
-    "break", "team", "code_name", "speakers", "points", "total_speaker_score",
-    "number_of_1sts", "number_of_2nds", "draw_strength_by_wins",
-]
+# ---------------------------------------------------------------------------------------------------------------
+# Per-format profiles. Rename a header here if your Google Sheet / Apps Script expects other names.
+# ---------------------------------------------------------------------------------------------------------------
+FORMAT_CONFIG = {
+    "bp": {
+        "label": "BP",
+        "separator": " & ",
+        "expected_speakers": (2, 2),
+        "headers": ["break", "team", "code_name", "speakers", "points", "total_speaker_score",
+                    "number_of_1sts", "number_of_2nds", "draw_strength_by_wins"],
+    },
+    "3v3": {           # AP / Australs / UADC: ranked by wins, then total speaker score
+        "label": "3v3 (AP / Australs / UADC)",
+        "separator": ", ",
+        "expected_speakers": (3, 3),
+        "headers": ["break", "team", "code_name", "speakers", "wins", "total_speaker_score"],
+    },
+    "wsdc": {          # WSDC: ranked by wins, then average total speaker score (ATSS)
+        "label": "WSDC",
+        "separator": ", ",
+        "expected_speakers": (3, 5),
+        "headers": ["break", "team", "code_name", "speakers", "wins", "average_total_speaker_score"],
+    },
+}
+# Extra last column with Tabbycat's remark for teams that did not break (Withdrawn, Reserve, Capped ...).
+# Set to False to leave it out.
+INCLUDE_REMARK_COLUMN = True
+# Columns that are never filled on an "intro" row (it only carries the break rank and the numbers)
+INTRO_BLANK_COLUMNS = {"team", "code_name", "speakers", "remark"}
+ATSS_DECIMALS = 2
+
+# ---------------------------------------------------------------------------------------------------------------
+# Awarding slides (speaker tabs). The column names are the slide placeholders: {{rank}} {{speaker}} {{team}} {{average}}
+# ---------------------------------------------------------------------------------------------------------------
+AWARD_HEADERS = ["rank", "speaker", "team", "average"]
+AWARD_INTRO_BLANK = {"speaker", "team", "remark"}       # not filled on an intro row
+AWARD_TOP_N = 10                                        # everybody ranked <= this number is exported (ties included)
+AWARD_AVG_DECIMALS = 2
+AWARD_MARK_TIES = False                                 # True -> tied speakers read "3RD=" instead of "3RD"
+# What you may type as the speaker tab: the main tab, the reply tab, or a speaker-category slug (e.g. unioncup)
+OPEN_TAB_NAMES = {"open", "all", "overall", "speaker", "speakers", "main", "speaker_tab"}
+REPLY_TAB_NAMES = {"replies", "reply", "reply_speaker", "reply_speakers", "replies_tab", "reply_tab"}
+AVERAGE_NAMES = ["average", "avg", "speaks_avg", "average_speaker_score", "speaker_average", "mean"]
+TOTAL_NAMES = ["total", "speaks_sum", "sum", "total_speaker_score"]
+# Endpoints that are tried, in this order (the first one that answers is used; the choice is written to the debug log)
+SPEAKER_STANDINGS_PATHS = ["/speakers/standings"]
+REPLY_STANDINGS_PATHS = ["/speakers/standings/replies", "/speakers/replies/standings", "/replies/standings",
+                         "/speakers/standings/reply"]
+
+REMARK_LABELS = {"C": "Capped", "I": "Ineligible", "D": "Different break", "d": "Disqualified",
+                 "t": "Lost coin toss", "w": "Withdrawn", "R": "Reserve"}
+
+FORMAT_ALIASES = {
+    "bp": "bp", "wudc": "bp", "eudc": "bp",
+    "wsdc": "wsdc", "ws": "wsdc", "wsc": "wsdc", "worldschools": "wsdc", "world_schools": "wsdc",
+}
+
+
+def normalize_format(value):
+    """'bp' -> bp, 'wsdc' -> wsdc, anything else ('3v3', 'australs', 'ap', 'uadc' ...) -> 3v3 (as before)."""
+    key = re.sub(r"[^a-z0-9_]+", "", str(value or "bp").strip().lower())
+    return FORMAT_ALIASES.get(key, "3v3")
+
+
+def headers_for(fmt):
+    return FORMAT_CONFIG[fmt]["headers"] + (["remark"] if INCLUDE_REMARK_COLUMN else [])
+
 
 # Names Tabbycat may use for the new metrics (compared after lower-casing and turning spaces/dashes into "_")
 FIRSTS_NAMES = ["firsts", "number_of_firsts", "num_firsts", "n_firsts", "1sts", "number_of_1sts", "first_places"]
 SECONDS_NAMES = ["seconds", "number_of_seconds", "num_seconds", "n_seconds", "2nds", "number_of_2nds", "second_places"]
 DRAW_NAMES = ["draw_strength", "draw_strength_by_wins", "draw_strength_wins", "draw_strength_points",
               "draw_strength_by_points", "opp_wins", "opponent_wins"]
+# 3v3 / WSDC (listed in order of preference)
+WINS_NAMES = ["wins", "num_wins", "win", "points"]
+TSS_NAMES = ["speaks_sum", "total_speaker_score", "total_speaks", "total_speaker_scores", "speaker_score", "speaks"]
+ATSS_NAMES = ["speaks_avg", "average_total_speaker_score", "atss", "average_speaker_score", "avg_speaks",
+              "average_speaks", "speaks_average"]
 
 
 def ordinal(n):
@@ -53,13 +134,11 @@ def ordinal(n):
 
 
 def format_speakers(speakers, debate_format):
+    """BP: 'A & B'.  3v3 / WSDC: 'A, B, C' (all speakers on the team, 3-5 for WSDC)."""
     if not speakers:
         return ""
     names = [s.get("name", "") for s in speakers if s.get("name")]
-    if debate_format == "bp":
-        return " & ".join(names)
-    else:
-        return ", ".join(names)
+    return FORMAT_CONFIG[normalize_format(debate_format)]["separator"].join(names)
 
 
 def format_speaker_score(score, debate_format):
@@ -72,6 +151,98 @@ def format_speaker_score(score, debate_format):
             return str(score)
     except (ValueError, TypeError):
         return str(score)
+
+
+def award_headers():
+    return AWARD_HEADERS + (["remark"] if INCLUDE_REMARK_COLUMN else [])
+
+
+def parse_rank(value):
+    """'3', 3, '3=' -> 3 ; anything else -> None"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.match(r"\s*(\d+)", str(value))
+    return int(match.group(1)) if match else None
+
+
+def norm_url(value):
+    if isinstance(value, dict):
+        value = value.get("url") if value.get("url") else value.get("id")
+    return str(value).strip().rstrip("/") if value not in (None, "") else ""
+
+
+def url_tail(value):
+    return norm_url(value).rsplit("/", 1)[-1].lower()
+
+
+def rank_group(rows):
+    """
+    rows: dicts with 'order' (position in the standings), 'rank' (the standings rank, or None) and 'tiekey'.
+    Sets row['group_rank'] with competition ranking (1, 2, 2, 4 ...) inside THIS group of speakers, e.g. a category:
+    it only depends on how many group members are strictly ahead, so speakers tied in the full standings stay tied.
+    Falls back to comparing 'tiekey' (total + average) in standings order when the API gives no rank.
+    Returns the rows in rank order.
+    """
+    if all(r["rank"] is not None for r in rows):
+        rows = sorted(rows, key=lambda r: (r["rank"], r["order"]))
+        ranks = [r["rank"] for r in rows]
+        for r in rows:
+            r["group_rank"] = bisect.bisect_left(ranks, r["rank"]) + 1
+    else:
+        rows = sorted(rows, key=lambda r: r["order"])
+        previous_key, previous_rank = object(), 0
+        for position, r in enumerate(rows, start=1):
+            if r["tiekey"] != previous_key:
+                previous_rank, previous_key = position, r["tiekey"]
+            r["group_rank"] = previous_rank
+    counts = Counter(r["group_rank"] for r in rows)
+    for r in rows:
+        r["tied"] = counts[r["group_rank"]] > 1
+    return rows
+
+
+def match_speaker_category(categories, wanted):
+    """Exact slug, then exact name, then 'name contains' (same idea as for break categories)."""
+    wanted = str(wanted or "").strip().lower()
+    for cat in categories:
+        if wanted == str(cat.get("slug", "")).lower() or wanted == url_tail(cat.get("url", "")):
+            return cat
+    for cat in categories:
+        if wanted == str(cat.get("name", "")).lower():
+            return cat
+    for cat in categories:
+        if wanted and wanted in str(cat.get("name", "")).lower():
+            return cat
+    return None
+
+
+def format_fixed(value, decimals):
+    """ATSS and similar: always the same number of decimals (e.g. 228.50 -> '228.50')."""
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):.{decimals}f}"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+def remark_label(value):
+    if value is None or value == "":
+        return ""
+    text = str(value).strip()
+    return REMARK_LABELS.get(text, text)
+
+
+def rank_number(value):
+    """break_rank -> int, or None when it is missing / not a number."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def format_number(value):
@@ -145,6 +316,75 @@ def find_extra_metric(metrics, exact_names, contains, exclude=()):
     return False, None
 
 
+def find_preferred_metric(metrics, names, require_all=(), require_any=(), exclude=()):
+    """
+    Look for a metric by slug, trying `names` in order of preference. If none matches, fall back to a metric whose
+    name contains all of `require_all` and at least one of `require_any` (when given) and nothing from `exclude`.
+    Returns (found, value).
+    """
+    if not metrics:
+        return False, None
+    normalised = [(_norm_metric(m.get("metric", "")), m) for m in metrics if isinstance(m, dict)]
+    by_name = {}
+    for name, m in normalised:
+        by_name.setdefault(name, m)
+    for want in names:
+        if _norm_metric(want) in by_name:
+            return True, by_name[_norm_metric(want)].get("value")
+    if require_all or require_any:
+        for name, m in normalised:
+            if all(tok in name for tok in require_all) \
+                    and (not require_any or any(tok in name for tok in require_any)) \
+                    and not any(bad in name for bad in exclude):
+                return True, m.get("value")
+    return False, None
+
+
+def extract_metrics(fmt, metrics, team_obj=None):
+    """
+    Standings metrics of ONE team -> ({csv header: text}, {csv header: metric was found}) for the given format.
+    """
+    team_obj = team_obj or {}
+    values, found = {}, {}
+    if fmt == "bp":
+        points, _ = _find_metric(metrics, ["points", "wins", "team_points", "num_wins", "pts"])
+        speaker_score, all_names = _find_metric(metrics, [
+            "speaks_sum", "speaks", "speaker_score", "total_speaker_score",
+            "average_speaker_score", "total_speaks", "avg_speaks",
+            "total", "average", "avg", "score", "spk", "speaker",
+            "total score", "speaker scores", "cumulative"
+        ])
+        # test for None instead of "falsy", so a real 0 is no longer replaced by a fallback / left blank
+        if points is None or points == "":
+            points = team_obj.get("points") if team_obj.get("points") is not None else team_obj.get("wins")
+        if speaker_score is None or speaker_score == "":
+            speaker_score = team_obj.get("speaker_score") if team_obj.get("speaker_score") is not None \
+                else team_obj.get("total_speaker_score")
+        values["points"] = format_number(points)
+        values["total_speaker_score"] = format_speaker_score(speaker_score, "bp")
+        found["points"] = points is not None and points != ""
+        found["total_speaker_score"] = speaker_score is not None and speaker_score != ""
+        for header, names, contains, exclude in (
+                ("number_of_1sts", FIRSTS_NAMES, "first", ()),
+                ("number_of_2nds", SECONDS_NAMES, "second", ()),
+                ("draw_strength_by_wins", DRAW_NAMES, "draw", ("speak", "score", "margin"))):
+            ok, value = find_extra_metric(metrics, names, contains, exclude)
+            values[header], found[header] = format_number(value), ok
+    else:
+        ok, wins = find_preferred_metric(metrics, WINS_NAMES, require_all=("win",), exclude=("draw", "pull", "opp", "strength"))
+        values["wins"], found["wins"] = format_number(wins), ok
+        if fmt == "3v3":
+            ok, tss = find_preferred_metric(metrics, TSS_NAMES, require_all=("speak",),
+                                            exclude=("avg", "average", "std", "draw", "margin", "rank"))
+            values["total_speaker_score"], found["total_speaker_score"] = format_number(tss), ok
+        else:  # wsdc
+            ok, atss = find_preferred_metric(metrics, ATSS_NAMES, require_all=("speak",), require_any=("avg", "average"),
+                                             exclude=("std", "draw", "margin", "rank"))
+            values["average_total_speaker_score"] = format_fixed(atss, ATSS_DECIMALS)
+            found["average_total_speaker_score"] = ok
+    return values, found
+
+
 class TabbycatAPI:
     def __init__(self, base_url, token, tournament_slug):
         self.base_url = base_url.rstrip("/")
@@ -152,7 +392,7 @@ class TabbycatAPI:
         self.slug = tournament_slug.strip("/")
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "TabbycatBreakExporter/3.2 (Render; Python requests)",
+            "User-Agent": "TabbycatBreakExporter/3.3 (Render; Python requests)",
             "Accept": "application/json",
             "Content-Type": "application/json",
         })
@@ -219,7 +459,8 @@ class TabbycatAPI:
             return resp_data["_status"]
         return 200
 
-    def test_connection(self):
+    def test_connection(self, debate_format="bp"):
+        fmt = normalize_format(debate_format)
         diagnostics = {"ok": False, "steps": [], "suggestion": ""}
         try:
             resp = self.session.get(self.base_url, timeout=10, allow_redirects=True)
@@ -263,20 +504,33 @@ class TabbycatAPI:
             if sstatus == 200:
                 standings = _unwrap_results(st_data)
                 names = sorted({m.get("metric", "") for st in standings for m in st.get("metrics", [])})
-                metrics = [{"metric": n} for n in names]
-                missing = []
-                if not find_extra_metric(metrics, FIRSTS_NAMES, "first")[0]:
-                    missing.append("number_of_1sts")
-                if not find_extra_metric(metrics, SECONDS_NAMES, "second")[0]:
-                    missing.append("number_of_2nds")
-                if not find_extra_metric(metrics, DRAW_NAMES, "draw", ("speak", "score", "margin"))[0]:
-                    missing.append("draw_strength_by_wins")
-                notes.append("Standings metrics found: " + (", ".join(names) or "none") + ".")
+                metrics = [{"metric": n, "value": 0} for n in names]      # names only: a dummy value marks "present"
+                _, found = extract_metrics(fmt, metrics)
+                missing = [h for h, ok in found.items() if not ok]
+                notes.append(f"Format: {FORMAT_CONFIG[fmt]['label']}. Standings metrics found: " + (", ".join(names) or "none") + ".")
                 if missing:
                     notes.append("Not in this tab's standings (columns will be blank): " + ", ".join(missing) +
                                  ". Add them under Tabbycat settings > team standings (precedence or extra metrics).")
             elif sstatus in (401, 403):
                 notes.append("Team standings are not readable with this token.")
+            # v3.4: speaker tabs for the awarding export
+            sp_path, sp_entries, sp_tried = self.get_speaker_standings(replies=False)
+            if sp_path:
+                diagnostics["steps"].append({"step": f"Speaker standings ({sp_path})", "status": 200, "ok": True})
+                names = sorted({m.get("metric", "") for st in sp_entries[:5] for m in st.get("metrics", [])})
+                if sp_entries and not find_preferred_metric([{"metric": n, "value": 0} for n in names], AVERAGE_NAMES,
+                                                            require_any=("avg", "average", "mean"))[0]:
+                    notes.append("Speaker standings have no average metric (found: " + (", ".join(names) or "none") + ").")
+            else:
+                diagnostics["steps"].append({"step": "Speaker standings (" + "; ".join(sp_tried) + ")", "status": 0, "ok": False})
+                notes.append("Speaker standings could not be read, so the awarding export will not work with this token.")
+            if fmt != "bp":
+                rp_path, _, rp_tried = self.get_speaker_standings(replies=True)
+                if rp_path:
+                    diagnostics["steps"].append({"step": f"Reply speaker standings ({rp_path})", "status": 200, "ok": True})
+                else:
+                    diagnostics["steps"].append({"step": "Reply speaker standings (" + "; ".join(rp_tried) + ")", "status": 0, "ok": False})
+                    notes.append("Reply speaker standings were not found at the usual addresses.")
             if notes:
                 diagnostics["suggestion"] += " " + " ".join(notes)
         elif status == 401:
@@ -336,6 +590,42 @@ class TabbycatAPI:
         data = self._get_list(url)
         return data if isinstance(data, list) else []
 
+    def get_speakers(self):
+        """All speakers (name, team, categories, anonymous). None if the list cannot be read."""
+        data = self._get_list(self._url("/speakers"))
+        if isinstance(data, dict) and "_error" in data:
+            self._log(f"Speakers error: {data.get('_error')} status={data.get('_status')}")
+            return None
+        self._log(f"Speakers: {len(data)}")
+        return data
+
+    def get_speaker_categories(self):
+        data = self._get_list(self._url("/speaker-categories"))
+        if isinstance(data, dict) and "_error" in data:
+            self._log(f"Speaker categories error: {data.get('_error')} status={data.get('_status')}")
+            return None
+        return data
+
+    def get_speaker_standings(self, replies=False):
+        """
+        -> (path that worked or None, entries, ["path -> HTTP status", ...] for the paths that did not work).
+        Replies are only tried on the reply-specific paths, so the main standings can never be mistaken for them.
+        """
+        tried = []
+        for path in (REPLY_STANDINGS_PATHS if replies else SPEAKER_STANDINGS_PATHS):
+            data = self._get_list(self._url(path))
+            if isinstance(data, dict) and "_error" in data:
+                tried.append(f"{path} -> HTTP {data.get('_status')}")
+                continue
+            self._log(f"Speaker standings ({'replies' if replies else 'main'}) from {path}: {len(data)} entries")
+            if data and isinstance(data[0], dict):
+                self._log(f"Speaker standings keys: {list(data[0].keys())}")
+                metrics = data[0].get("metrics", [])
+                if metrics:
+                    self._log("Speaker metrics: " + str([m.get("metric", "") for m in metrics]))
+            return path, data, tried
+        return None, [], tried
+
     def get_team_standings(self):
         url = self._url("/teams/standings")
         data = self._get_list(url)
@@ -356,6 +646,10 @@ class TabbycatAPI:
 
 
 def export_break_csv(api, category_slug, debate_format, intro_rows=True):
+    fmt = normalize_format(debate_format)
+    headers = headers_for(fmt)
+    low, high = FORMAT_CONFIG[fmt]["expected_speakers"]
+
     category_id, category_info = api.get_break_category_by_slug(category_slug)
 
     if category_id is None:
@@ -363,15 +657,16 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
         slugs = [c.get("slug", "") for c in available]
         return None, f'Category "{category_slug}" not found. Available: {", ".join(slugs) or "none"}', {}
 
-    api._log(f"Category: {category_info.get('name')} (id={category_id})")
+    api._log(f"Category: {category_info.get('name')} (id={category_id}) | format: {FORMAT_CONFIG[fmt]['label']}")
 
     breaking = api.get_breaking_teams(category_id)
     if not breaking:
         return None, f'No breaking teams found for "{category_slug}". {" | ".join(api.debug_log)}', {}
 
-    # v3.2: teams with a break rank first, in break order; teams without one (capped / ineligible ...) keep their order after
-    breaking = sorted(breaking, key=lambda bt: (bt.get("break_rank") is None,
-                                                bt.get("break_rank") if bt.get("break_rank") is not None else 0))
+    # Order = Tabbycat's BREAK column (break_rank), never the standings "Rank" column.
+    # Teams without a break rank (withdrawn / reserve / capped ...) are kept, after the ranked teams, in their original order.
+    breaking = sorted(breaking, key=lambda bt: (rank_number(bt.get("break_rank")) is None,
+                                                rank_number(bt.get("break_rank")) or 0))
 
     all_teams = api.get_teams()
     team_lookup = {}
@@ -393,9 +688,9 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
             standings_lookup[st["id"]] = st
     api._log(f"Standings lookup: {len(standings_lookup)} entries")
 
-    seq_counter = 1
     rows = []
-    metric_found = {"firsts": False, "seconds": False, "draw": False}
+    metric_found = {}
+    odd_speaker_counts = []
 
     for bt in breaking:
         team_data = bt.get("team")
@@ -430,99 +725,215 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True):
         )
 
         speakers = team_obj.get("speakers", [])
-        speakers_str = format_speakers(speakers, debate_format)
+        speakers_str = format_speakers(speakers, fmt)
+        n_speakers = len([s for s in speakers if s.get("name")])
+        if not low <= n_speakers <= high:
+            odd_speaker_counts.append(f"{team_name}: {n_speakers}")
 
         st = standings_lookup.get(team_id) if team_id else None
-        points = None
-        speaker_score = None
-        firsts = seconds = draw_strength = None
-        all_metric_names = []
-
         if st:
-            metrics = st.get("metrics", [])
-            points, _ = _find_metric(metrics, ["points", "wins", "team_points", "num_wins", "pts"])
-            speaker_score, all_metric_names = _find_metric(metrics, [
-                "speaks_sum", "speaks", "speaker_score", "total_speaker_score",
-                "average_speaker_score", "total_speaks", "avg_speaks",
-                "total", "average", "avg", "score", "spk", "speaker",
-                "total score", "speaker scores", "cumulative"
-            ])
-            if speaker_score is None or speaker_score == "":
-                api._log(f"No speaker score for {team_name}. Metrics: {all_metric_names}")
-
-            found, firsts = find_extra_metric(metrics, FIRSTS_NAMES, "first")
-            metric_found["firsts"] |= found
-            found, seconds = find_extra_metric(metrics, SECONDS_NAMES, "second")
-            metric_found["seconds"] |= found
-            found, draw_strength = find_extra_metric(metrics, DRAW_NAMES, "draw", ("speak", "score", "margin"))
-            metric_found["draw"] |= found
+            values, found = extract_metrics(fmt, st.get("metrics", []), team_obj)
         else:
             api._log(f"No standings for {team_name} (id={team_id})")
+            values, found = extract_metrics(fmt, [], team_obj)
+        for header, ok in found.items():
+            metric_found[header] = metric_found.get(header, False) or ok
 
-        # v3.2: test for None instead of "falsy", so a real 0 is no longer replaced by a fallback / left blank
-        if points is None or points == "":
-            points = team_obj.get("points") if team_obj.get("points") is not None else team_obj.get("wins")
-        if speaker_score is None or speaker_score == "":
-            speaker_score = team_obj.get("speaker_score") if team_obj.get("speaker_score") is not None \
-                else team_obj.get("total_speaker_score")
-
-        points_str = format_number(points)
-        speaker_score_str = format_speaker_score(speaker_score, debate_format)
-
+        # "Break" column: the break rank exactly as Tabbycat shows it (not re-counted, not the standings rank)
         break_rank = bt.get("break_rank")
-        if break_rank is not None:
-            rank_str = ordinal(seq_counter)
-            seq_counter += 1
-        else:
-            rank_str = ""
+        rank_str = ordinal(break_rank) if break_rank is not None and break_rank != "" else ""
 
-        rows.append({
-            "break": rank_str,
-            "team": team_name,
-            "code_name": code_name,
-            "speakers": speakers_str,
-            "points": points_str,
-            "total_speaker_score": speaker_score_str,
-            "number_of_1sts": format_number(firsts),
-            "number_of_2nds": format_number(seconds),
-            "draw_strength_by_wins": format_number(draw_strength),
-        })
+        row = {"break": rank_str, "team": team_name, "code_name": code_name, "speakers": speakers_str,
+               "remark": remark_label(bt.get("remark"))}
+        row.update(values)
+        rows.append(row)
 
     if not rows:
         return None, f"No valid data. {' | '.join(api.debug_log)}", {}
 
-    missing = [name for key, name in (("firsts", "number_of_1sts"), ("seconds", "number_of_2nds"),
-                                      ("draw", "draw_strength_by_wins")) if not metric_found[key]]
+    missing = [h for h in headers if h in metric_found and not metric_found[h]]
     if missing:
         api._log("Metrics not found in standings (columns left blank): " + ", ".join(missing))
+    if odd_speaker_counts:
+        api._log(f"Speaker count outside {low}-{high} for the {FORMAT_CONFIG[fmt]['label']} format: " + "; ".join(odd_speaker_counts[:10]))
 
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(CSV_HEADERS)
+    writer.writerow(headers)
     intro_count = 0
     for row in rows:
-        # v3.2: "intro" row = same break rank + numbers, but no team / code_name / speakers.
-        # Only for teams that really have a break rank (not for capped / unranked teams).
+        # "intro" row = same break rank + numbers, but no team / code_name / speakers.
+        # Only for teams that really have a break rank (not for withdrawn / reserve / capped teams).
         if intro_rows and row["break"]:
-            writer.writerow([
-                row["break"], "", "", "",
-                row["points"], row["total_speaker_score"],
-                row["number_of_1sts"], row["number_of_2nds"], row["draw_strength_by_wins"],
-            ])
+            writer.writerow([("" if h in INTRO_BLANK_COLUMNS else row.get(h, "")) for h in headers])
             intro_count += 1
-        writer.writerow([row[h] for h in CSV_HEADERS])
+        writer.writerow([row.get(h, "") for h in headers])
 
     metadata = {
         "category_name": category_info.get("name", category_slug) if category_info else category_slug,
         "category_slug": category_slug,
-        "debate_format": debate_format,
+        "debate_format": fmt,
+        "columns": headers,
         "team_count": len(rows),
+        "ranked_teams": sum(1 for r in rows if r["break"]),
+        "unranked_teams": sum(1 for r in rows if not r["break"]),
         "intro_rows": intro_count,
         "row_count": len(rows) + intro_count,
         "missing_metrics": missing,
         "debug": " | ".join(api.debug_log),
     }
     return output.getvalue(), None, metadata
+
+
+def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWARD_TOP_N):
+    """
+    Top speakers of one speaker tab -> CSV with the columns rank, speaker, team, average (+ remark).
+    award_tab: 'open' (main speaker tab) | a speaker-category slug such as 'unioncup' | 'replies' (3v3 / WSDC only).
+    Everybody whose rank is <= top_n is exported, so ties at the cut-off can make the list longer than top_n.
+    """
+    fmt = normalize_format(debate_format)
+    tab = re.sub(r"[^a-z0-9_]+", "_", str(award_tab or "open").strip().lower()).strip("_") or "open"
+    is_reply = tab in REPLY_TAB_NAMES
+    is_open = tab in OPEN_TAB_NAMES
+    try:
+        top_n = max(int(top_n), 1)
+    except (ValueError, TypeError):
+        top_n = AWARD_TOP_N
+
+    if is_reply and fmt == "bp":
+        return None, "The reply speaker tab only exists for the 3v3 and WSDC formats (BP has no reply speeches).", {}
+
+    speakers = api.get_speakers()
+    if speakers is None:
+        return None, "Could not read the speakers list. " + " | ".join(api.debug_log), {}
+
+    category = None
+    if not is_open and not is_reply:
+        categories = api.get_speaker_categories()
+        if categories is None:
+            return None, "Could not read the speaker categories. " + " | ".join(api.debug_log), {}
+        category = match_speaker_category(categories, tab)
+        if category is None:
+            options = ["open"] + [c.get("slug") or url_tail(c.get("url", "")) for c in categories] \
+                + ([] if fmt == "bp" else ["replies"])
+            return None, f'Speaker tab "{award_tab}" not found. Available: {", ".join(options)}', {}
+        api._log(f"Speaker category: {category.get('name')} ({category.get('slug')})")
+
+    path, standings, tried = api.get_speaker_standings(replies=is_reply)
+    if path is None:
+        which = "reply speaker" if is_reply else "speaker"
+        status_hint = ""
+        if any("401" in t or "403" in t for t in tried):
+            status_hint = " The token may not be allowed to read standings: use an admin / tab account token."
+        return None, (f"The {which} standings could not be read from the API (tried: {'; '.join(tried)})." + status_hint +
+                      " Open the Test Connection box for details."), {}
+    if not standings:
+        return None, "The speaker standings are empty.", {}
+
+    speaker_lookup = {}
+    for sp in speakers:
+        if sp.get("id") is not None:
+            speaker_lookup[str(sp["id"])] = sp
+        if norm_url(sp.get("url")):
+            speaker_lookup[norm_url(sp.get("url"))] = sp
+    team_lookup = {}
+    for team in api.get_teams():
+        if team.get("id") is not None:
+            team_lookup[str(team["id"])] = team
+        if norm_url(team.get("url")):
+            team_lookup[norm_url(team.get("url"))] = team
+
+    cat_urls = cat_tails = None
+    if category is not None:
+        cat_urls = {norm_url(category.get("url")).lower()}
+        cat_tails = {str(category.get("slug", "")).lower(), url_tail(category.get("url", ""))}
+        cat_tails.discard("")
+
+    rows = []
+    skipped_unknown = 0
+    for order, st in enumerate(standings):
+        ref = st.get("speaker")
+        speaker = speaker_lookup.get(norm_url(ref)) or speaker_lookup.get(str(extract_id_from_url(norm_url(ref))))
+        if speaker is None:
+            skipped_unknown += 1
+            continue
+        if category is not None:
+            mine = {norm_url(c).lower() for c in speaker.get("categories", [])}
+            mine_tails = {url_tail(c) for c in speaker.get("categories", [])}
+            if not (mine & cat_urls or mine_tails & cat_tails):
+                continue
+        metrics = st.get("metrics", [])
+        _, average = find_preferred_metric(metrics, AVERAGE_NAMES, require_any=("avg", "average", "mean"),
+                                           exclude=("trim", "std", "dev", "count", "num", "total", "sum"))
+        _, total = find_preferred_metric(metrics, TOTAL_NAMES)
+        rows.append({
+            "order": order, "speaker": speaker, "average": average,
+            "rank": parse_rank(st.get("rank")),
+            "tiekey": (format_fixed(total, 4), format_fixed(average, 4)),
+        })
+    if skipped_unknown:
+        api._log(f"{skipped_unknown} standings entries did not match a speaker and were skipped")
+    if not rows:
+        return None, f'No speakers found for the "{award_tab}" tab. ' + " | ".join(api.debug_log), {}
+
+    rows = rank_group(rows)
+    chosen = [r for r in rows if r["group_rank"] <= top_n]
+
+    headers = award_headers()
+    out_rows = []
+    for r in chosen:
+        sp = r["speaker"]
+        team_obj = team_lookup.get(norm_url(sp.get("team"))) or team_lookup.get(str(extract_id_from_url(norm_url(sp.get("team")))))
+        team_name = ""
+        if team_obj:
+            team_name = (team_obj.get("short_name") or team_obj.get("long_name") or team_obj.get("reference")
+                         or team_obj.get("code_name") or "")
+        rank_text = ordinal(r["group_rank"]) + ("=" if AWARD_MARK_TIES and r["tied"] else "")
+        out_rows.append({
+            "rank": rank_text, "speaker": sp.get("name", ""), "team": team_name,
+            "average": format_fixed(r["average"], AWARD_AVG_DECIMALS),
+            "remark": "Anonymous" if sp.get("anonymous") else "",
+        })
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    intro_count = 0
+    for row in out_rows:
+        if intro_rows:
+            writer.writerow([("" if h in AWARD_INTRO_BLANK else row.get(h, "")) for h in headers])
+            intro_count += 1
+        writer.writerow([row.get(h, "") for h in headers])
+
+    missing_avg = sum(1 for r in out_rows if r["average"] == "")
+    if missing_avg:
+        api._log(f"{missing_avg} exported speaker(s) have no average in the standings (cell left blank)")
+    label = "Reply speakers" if is_reply else (category.get("name") if category else "Open speakers")
+    metadata = {
+        "export_type": "awards", "tab": tab, "tab_label": label, "standings_path": path,
+        "debate_format": fmt, "columns": headers, "top_n": top_n,
+        "speakers_in_tab": len(rows), "exported_speakers": len(out_rows),
+        "ties_at_cutoff": len(out_rows) > top_n,
+        "anonymous_speakers": [r["speaker"] for r in out_rows if r["remark"]],
+        "intro_rows": intro_count, "row_count": len(out_rows) + intro_count,
+        "missing_metrics": ["average"] if missing_avg else [],
+        "debug": " | ".join(api.debug_log),
+    }
+    return output.getvalue(), None, metadata
+
+
+def run_export(api, params):
+    """One entry point for the form and the JSON endpoints. -> (csv_text, error, metadata, filename_suffix)"""
+    export_type = str(params.get("export_type") or "break").strip().lower()
+    intro_rows = _intro_flag(params.get("intro_rows"))
+    fmt = normalize_format(params.get("debate_format", "bp"))
+    if export_type in ("awards", "award", "speakers"):
+        tab = str(params.get("award_tab") or "open").strip().lower()
+        csv_text, error, meta = export_awards_csv(api, tab, fmt, intro_rows, params.get("top_n") or AWARD_TOP_N)
+        return csv_text, error, meta, f"{re.sub(r'[^a-z0-9_]+', '_', tab) or 'open'}_awards"
+    category_slug = str(params.get("category_slug") or "").strip().lower()
+    csv_text, error, meta = export_break_csv(api, category_slug, fmt, intro_rows)
+    return csv_text, error, meta, f"{category_slug}_break"
 
 
 def _intro_flag(value, default=True):
@@ -543,41 +954,67 @@ def index():
 def test_connection():
     data = request.get_json()
     api = TabbycatAPI(data.get("base_url", ""), data.get("token", ""), data.get("slug", ""))
-    diagnostics = api.test_connection()
+    fmt = normalize_format(data.get("debate_format", "bp"))
+    diagnostics = api.test_connection(fmt)
     if diagnostics["ok"]:
         categories = api.get_break_categories()
         diagnostics["break_categories"] = [
             {"name": c.get("name", ""), "slug": c.get("slug", ""), "url": c.get("url", "")}
             for c in categories
         ]
+        speaker_cats = api.get_speaker_categories() or []
+        tabs = [{"slug": "open", "name": "Open speakers (main speaker tab)"}]
+        tabs += [{"slug": c.get("slug") or url_tail(c.get("url", "")), "name": c.get("name", "")} for c in speaker_cats]
+        if fmt != "bp":
+            tabs.append({"slug": "replies", "name": "Reply speakers"})
+        diagnostics["speaker_tabs"] = tabs
     return jsonify(diagnostics)
+
+
+def _missing_fields(params):
+    """Which required fields are empty (the break export also needs a break category, the awards export does not)."""
+    needed = ["base_url", "token", "slug"]
+    if str(params.get("export_type") or "break").strip().lower() not in ("awards", "award", "speakers"):
+        needed.append("category_slug")
+    return [k for k in needed if not str(params.get(k) or "").strip()]
+
+
+def _clean_params(source):
+    return {
+        "base_url": str(source.get("base_url") or "").strip(),
+        "token": str(source.get("token") or "").strip(),
+        "slug": str(source.get("slug") or "").strip(),
+        "category_slug": str(source.get("category_slug") or "").strip().lower(),
+        "export_type": source.get("export_type"),
+        "award_tab": source.get("award_tab"),
+        "top_n": source.get("top_n"),
+        "debate_format": source.get("debate_format", "bp"),
+        "intro_rows": source.get("intro_rows"),
+    }
 
 
 @app.route("/export", methods=["POST"])
 def export():
-    base_url = request.form.get("base_url", "").strip()
-    token = request.form.get("token", "").strip()
-    slug = request.form.get("slug", "").strip()
-    category_slug = request.form.get("category_slug", "").strip().lower()
-    debate_format = request.form.get("debate_format", "bp")
-    intro_rows = _intro_flag(request.form.get("intro_rows"))
+    params = _clean_params(request.form)
 
-    if not all([base_url, token, slug, category_slug]):
+    if _missing_fields(params):
         flash("All fields are required.", "error")
         return redirect(url_for("index"))
 
-    api = TabbycatAPI(base_url, token, slug)
-    csv_data, error, metadata = export_break_csv(api, category_slug, debate_format, intro_rows)
+    api = TabbycatAPI(params["base_url"], params["token"], params["slug"])
+    csv_data, error, metadata, suffix = run_export(api, params)
 
     if error:
         flash(error, "error")
         return redirect(url_for("index"))
 
-    filename = f"{slug}_{category_slug}_break.csv"
+    filename = f"{params['slug']}_{suffix}.csv"
     buffer = io.BytesIO(csv_data.encode("utf-8"))
     response = send_file(buffer, mimetype="text/csv", as_attachment=True, download_name=filename)
     if metadata.get("missing_metrics"):
         response.headers["X-Missing-Metrics"] = ",".join(metadata["missing_metrics"])
+    if metadata.get("anonymous_speakers"):
+        response.headers["X-Anonymous-Speakers"] = str(len(metadata["anonymous_speakers"]))
     return response
 
 
@@ -587,18 +1024,12 @@ def api_export():
     if not data:
         return jsonify({"ok": False, "error": "JSON body required"}), 400
 
-    base_url = data.get("base_url", "").strip()
-    token = data.get("token", "").strip()
-    slug = data.get("slug", "").strip()
-    category_slug = data.get("category_slug", "").strip().lower()
-    debate_format = data.get("debate_format", "bp")
-    intro_rows = _intro_flag(data.get("intro_rows"))
-
-    if not all([base_url, token, slug, category_slug]):
+    params = _clean_params(data)
+    if _missing_fields(params):
         return jsonify({"ok": False, "error": "Missing required fields"}), 400
 
-    api = TabbycatAPI(base_url, token, slug)
-    csv_data, error, metadata = export_break_csv(api, category_slug, debate_format, intro_rows)
+    api = TabbycatAPI(params["base_url"], params["token"], params["slug"])
+    csv_data, error, metadata, _ = run_export(api, params)
 
     if error:
         return jsonify({"ok": False, "error": error, "debug": metadata.get("debug", "")}), 400
@@ -612,15 +1043,9 @@ def api_export_csv_raw():
     if not data:
         return "Error: JSON body required", 400
 
-    base_url = data.get("base_url", "").strip()
-    token = data.get("token", "").strip()
-    slug = data.get("slug", "").strip()
-    category_slug = data.get("category_slug", "").strip().lower()
-    debate_format = data.get("debate_format", "bp")
-    intro_rows = _intro_flag(data.get("intro_rows"))
-
-    api = TabbycatAPI(base_url, token, slug)
-    csv_data, error, _ = export_break_csv(api, category_slug, debate_format, intro_rows)
+    params = _clean_params(data)
+    api = TabbycatAPI(params["base_url"], params["token"], params["slug"])
+    csv_data, error, _, _ = run_export(api, params)
 
     if error:
         return f"Error: {error}", 400
