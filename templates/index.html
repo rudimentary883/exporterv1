@@ -121,7 +121,7 @@
 </head>
 <body>
     <h1>Tabbycat Break Exporter <span style="font-size:14px;color:#888;">v1.0</span></h1>
-    <p class="subtitle">Export breaking teams to CSV for automated break slides</p>
+    <p class="subtitle">Export breaking teams or top speakers to CSV for automated break / awarding slides</p>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
@@ -148,11 +148,9 @@
                     <p class="hint">The part after the URL slash</p>
                 </div>
             </div>
-
             <label for="token">API Token</label>
             <input type="text" name="token" id="token" placeholder="abc123def456..." required>
-            <p class="hint">Found on your Tabbycat "Change Password" page. Long random string.</p>
-
+            <p class="hint">Found on your Tabbycat "Change Password" page. Long random string. Use an <strong>admin</strong> account's token to export the break before it is public.</p>
             <div style="margin-top:15px;">
                 <button type="button" class="btn btn-secondary" onclick="testConnection()">Test Connection</button>
             </div>
@@ -160,28 +158,49 @@
         </div>
 
         <div class="card">
-            <h2>2. Break Category & Format</h2>
-            <div class="two-col">
-                <div>
+            <h2>2. What to Export</h2>
+            <label for="export_type" style="margin-top:0;">Export</label>
+            <select name="export_type" id="export_type" onchange="onExportTypeChange()">
+                <option value="break" selected>Breaking teams (break slides)</option>
+                <option value="awards">Top speakers (awarding slides)</option>
+            </select>
+            <div class="two-col" style="margin-top:5px;">
+                <div id="break_fields">
                     <label for="category_slug">Break Category Slug</label>
                     <input type="text" name="category_slug" id="category_slug" placeholder="open" value="open" required>
                     <p class="hint">e.g., <code>open</code>, <code>unioncup</code>, <code>esl</code>, <code>novice</code></p>
                 </div>
+                <div id="award_fields" style="display:none;">
+                    <label for="award_tab">Speaker Tab</label>
+                    <input type="text" name="award_tab" id="award_tab" placeholder="open" value="open">
+                    <p class="hint"><code>open</code> = main speaker tab, a speaker category slug (e.g. <code>unioncup</code>), or <code>replies</code> (3v3 / WSDC only). Test Connection lists the options.</p>
+                    <label for="top_n">Top how many?</label>
+                    <input type="number" name="top_n" id="top_n" value="10" min="1" max="100">
+                    <p class="hint">Everybody ranked this number or better is included, so a tie at the cut-off can make the list longer.</p>
+                </div>
                 <div>
                     <label for="debate_format">Debate Format</label>
-                    <select name="debate_format" id="debate_format">
+                    <select name="debate_format" id="debate_format" onchange="updateColumnsHint()">
                         <option value="bp">British Parliamentary (BP)</option>
-                        <option value="3v3">3v3 / WSDC / UADC / Australs</option>
+                        <option value="3v3">3v3 &mdash; AP / Australs / UADC (3 speakers)</option>
+                        <option value="wsdc">WSDC (3&ndash;5 speakers)</option>
                     </select>
-                    <p class="hint">Controls speaker formatting & score decimals</p>
+                    <p class="hint">Decides the columns, how teams are described and how speakers are separated</p>
                 </div>
             </div>
+            <label for="intro_rows">Intro rows for the slides</label>
+            <select name="intro_rows" id="intro_rows">
+                <option value="on" selected>Yes &mdash; add an intro row before each breaking team / speaker (rank and numbers only)</option>
+                <option value="off">No &mdash; one row each</option>
+            </select>
+            <p class="hint">The intro row repeats the rank and the numbers but leaves the team and speaker names blank, so the slides can show the numbers first and reveal the name on the next slide.</p>
         </div>
 
         <div class="card" style="text-align:center;">
             <button type="submit" class="btn btn-success" style="font-size:16px;padding:14px 32px;">
-                📥 Export Break CSV
+                📥 Export CSV
             </button>
+            <p class="hint" id="columns_hint"></p>
         </div>
     </form>
 
@@ -195,11 +214,36 @@
   "token": "your_api_token",
   "slug": "ndc2025",
   "category_slug": "open",
-  "debate_format": "bp"
+  "debate_format": "bp",      // "bp", "3v3" (AP / Australs / UADC) or "wsdc"
+  "intro_rows": true,
+  "export_type": "break",     // "break" (default) or "awards"
+  "award_tab": "open",        // awards only: "open", a speaker category slug, or "replies"
+  "top_n": 10                 // awards only
 }</pre>
+        <p class="hint"><code>intro_rows</code> is optional (default <code>true</code>); send <code>false</code> for one row each. For <code>"export_type": "awards"</code> the columns are <code>rank, speaker, team, average</code> (+ <code>remark</code>) and <code>category_slug</code> is not needed.</p>
     </div>
 
     <script>
+        const COLUMNS = {
+            bp:   'break, team, code_name, speakers (A & B), points, total_speaker_score, number_of_1sts, number_of_2nds, draw_strength_by_wins, remark',
+            '3v3': 'break, team, code_name, speakers (A, B, C), wins, total_speaker_score, remark',
+            wsdc: 'break, team, code_name, speakers (A, B, C, ...), wins, average_total_speaker_score, remark'
+        };
+        function updateColumnsHint() {
+            const fmt = document.getElementById('debate_format').value;
+            const awards = document.getElementById('export_type').value === 'awards';
+            document.getElementById('columns_hint').textContent = 'CSV columns: ' +
+                (awards ? 'rank, speaker, team, average, remark' : COLUMNS[fmt]);
+        }
+        function onExportTypeChange() {
+            const awards = document.getElementById('export_type').value === 'awards';
+            document.getElementById('break_fields').style.display = awards ? 'none' : '';
+            document.getElementById('award_fields').style.display = awards ? '' : 'none';
+            document.getElementById('category_slug').required = !awards;
+            updateColumnsHint();
+        }
+        onExportTypeChange();
+
         async function testConnection() {
             const resultDiv = document.getElementById('test_result');
             resultDiv.style.display = 'block';
@@ -209,7 +253,8 @@
             const payload = {
                 base_url: document.getElementById('base_url').value,
                 token: document.getElementById('token').value,
-                slug: document.getElementById('slug').value
+                slug: document.getElementById('slug').value,
+                debate_format: document.getElementById('debate_format').value
             };
 
             try {
@@ -221,10 +266,28 @@
                 const data = await resp.json();
 
                 if (data.ok) {
-                    resultDiv.className = 'test-result ok';
-                    let html = `<strong>✅ Connection successful!</strong><br>${data.suggestion}`;
+                    // Connected - but flag it if any individual check failed (e.g. the break itself is not readable yet)
+                    const problem = (data.steps || []).some(s => s.step !== 'Base URL reachable' && !s.ok);
+                    resultDiv.className = 'test-result ' + (problem ? 'info' : 'ok');
+                    let html = problem
+                        ? `<strong>⚠️ Connected, but check the notes below</strong><br>${data.suggestion}`
+                        : `<strong>✅ Connection successful!</strong><br>${data.suggestion}`;
+                    if (data.steps && data.steps.length > 0) {
+                        html += '<ul>';
+                        for (const step of data.steps) {
+                            html += `<li>${step.step}: HTTP ${step.status} ${step.ok ? '✓' : '✗'}</li>`;
+                        }
+                        html += '</ul>';
+                    }
+                    if (data.speaker_tabs && data.speaker_tabs.length > 0) {
+                        html += '<strong>Speaker tabs for awarding:</strong><ul>';
+                        for (const tab of data.speaker_tabs) {
+                            html += `<li><code>${tab.slug}</code> — ${tab.name}</li>`;
+                        }
+                        html += '</ul>';
+                    }
                     if (data.break_categories && data.break_categories.length > 0) {
-                        html += '<br><br><strong>Available break categories:</strong><ul>';
+                        html += '<strong>Available break categories:</strong><ul>';
                         for (const cat of data.break_categories) {
                             html += `<li><code>${cat.slug}</code> — ${cat.name}</li>`;
                         }
