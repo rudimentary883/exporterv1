@@ -194,6 +194,34 @@
                 <option value="off">No &mdash; one row each</option>
             </select>
             <p class="hint">The intro row repeats the rank and the numbers but leaves the team and speaker names blank, so the slides can show the numbers first and reveal the name on the next slide.</p>
+
+            <details style="margin-top:15px;">
+                <summary style="cursor:pointer;font-weight:600;color:#444;">Optional: add text next to the values (for Canva Bulk create)</summary>
+                <p class="hint" style="margin-top:8px;">
+                    Whatever you type is added <strong>inside the cell</strong>, after the value, so a Canva text box that is connected to the column keeps its label.
+                    Leave a box empty to add nothing. Not needed for Google Slides.
+                </p>
+                <div id="suffix_break_group">
+                    <label for="suffix_break">After the break rank</label>
+                    <input type="text" name="suffix_break" id="suffix_break" placeholder="OPEN BREAKING TEAM">
+                    <p class="hint">1ST &rarr; <code>1ST OPEN BREAKING TEAM</code>. Teams that are not breaking (Capped, Reserve ...) are left as they are.</p>
+                </div>
+                <div id="suffix_points_group">
+                    <label for="suffix_points">After the points (BP) / wins (3v3, WSDC)</label>
+                    <input type="text" name="suffix_points" id="suffix_points" placeholder="Team Points">
+                    <p class="hint">19 &rarr; <code>19 Team Points</code></p>
+                </div>
+                <div id="suffix_score_group">
+                    <label for="suffix_score">After the speaker score (BP, 3v3: total speaker score &middot; WSDC: average total speaker score)</label>
+                    <input type="text" name="suffix_score" id="suffix_score" placeholder="Speaker Points">
+                    <p class="hint">1125 &rarr; <code>1125 Speaker Points</code></p>
+                </div>
+                <div id="suffix_average_group" style="display:none;">
+                    <label for="suffix_average">After the average (awarding slides)</label>
+                    <input type="text" name="suffix_average" id="suffix_average" placeholder="average speaks">
+                    <p class="hint">81.50 &rarr; <code>81.50 average speaks</code></p>
+                </div>
+            </details>
         </div>
 
         <div class="card" style="text-align:center;">
@@ -218,28 +246,36 @@
   "intro_rows": true,
   "export_type": "break",     // "break" (default) or "awards"
   "award_tab": "open",        // awards only: "open", a speaker category slug, or "replies"
-  "top_n": 10                 // awards only
+  "top_n": 10,                // awards only
+  "suffix_break": "OPEN BREAKING TEAM",   // optional text added inside the cells (all four optional):
+  "suffix_points": "Team Points",         //   points / wins
+  "suffix_score": "Speaker Points",       //   total speaker score / average total speaker score
+  "suffix_average": "average speaks"      //   awards: the average
 }</pre>
-        <p class="hint"><code>intro_rows</code> is optional (default <code>true</code>); send <code>false</code> for one row each. For <code>"export_type": "awards"</code> the columns are <code>rank, speaker, team, average</code> (+ <code>remark</code>) and <code>category_slug</code> is not needed.</p>
+        <p class="hint"><code>intro_rows</code> is optional (default <code>true</code>); send <code>false</code> for one row each. For <code>"export_type": "awards"</code> the columns are <code>rank, speaker, team, average</code> and <code>category_slug</code> is not needed. In the break file the Break column holds the break rank, or the remark (Capped, Ineligible, Reserve, Withdrawn) of a team that is not breaking.</p>
     </div>
 
     <script>
         const COLUMNS = {
-            bp:   'break, team, code_name, speakers (A & B), points, total_speaker_score, number_of_1sts, number_of_2nds, draw_strength_by_wins, remark',
-            '3v3': 'break, team, code_name, speakers (A, B, C), wins, total_speaker_score, remark',
-            wsdc: 'break, team, code_name, speakers (A, B, C, ...), wins, average_total_speaker_score, remark'
+            bp:   'break, team, code_name, speakers (A & B), points, total_speaker_score, number_of_1sts, number_of_2nds, draw_strength_by_wins',
+            '3v3': 'break, team, code_name, speakers (A, B, C), wins, total_speaker_score',
+            wsdc: 'break, team, code_name, speakers (A, B, C, ...), wins, average_total_speaker_score'
         };
         function updateColumnsHint() {
             const fmt = document.getElementById('debate_format').value;
             const awards = document.getElementById('export_type').value === 'awards';
             document.getElementById('columns_hint').textContent = 'CSV columns: ' +
-                (awards ? 'rank, speaker, team, average, remark' : COLUMNS[fmt]);
+                (awards ? 'rank, speaker, team, average' : COLUMNS[fmt]);
         }
         function onExportTypeChange() {
             const awards = document.getElementById('export_type').value === 'awards';
             document.getElementById('break_fields').style.display = awards ? 'none' : '';
             document.getElementById('award_fields').style.display = awards ? '' : 'none';
             document.getElementById('category_slug').required = !awards;
+            for (const id of ['suffix_break_group', 'suffix_points_group', 'suffix_score_group']) {
+                document.getElementById(id).style.display = awards ? 'none' : '';
+            }
+            document.getElementById('suffix_average_group').style.display = awards ? '' : 'none';
             updateColumnsHint();
         }
         onExportTypeChange();
