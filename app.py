@@ -1,4 +1,7 @@
 """
+Tabbycat Break Exporter v3.6
+  * v3.6: + optional text after the speaker RANK in the awarding export (suffix_rank: "2ND" -> "2ND BEST EFL SPEAKER")
+          + ordinal_case: "upper" (1ST, 2ND, 3RD, 41ST) or "lower" (1st, 2nd, 3rd, 41st) for the break rank and the speaker rank
 Tabbycat Break Exporter v3.5
   * v3.5: break export keeps the order of Tabbycat's admin break table (the standings RANK), also for teams that are not
           breaking. Their remark (Capped / Ineligible / Reserve / Withdrawn ...) goes into the "break" column and the
@@ -122,19 +125,30 @@ ATSS_NAMES = ["speaks_avg", "average_total_speaker_score", "atss", "average_spea
               "average_speaks", "speaks_average"]
 
 
-def ordinal(n):
-    """Convert integer to UPPERCASE ordinal: 1→1ST, 2→2ND, 3→3RD, 4→4TH, etc."""
+def ordinal(n, case="upper"):
+    """
+    Integer -> ordinal: 1 -> 1ST, 2 -> 2ND, 3 -> 3RD, 4 -> 4TH, 11 -> 11TH, 12 -> 12TH, 13 -> 13TH, 21 -> 21ST, 41 -> 41ST,
+    101 -> 101ST, 111 -> 111TH ...   case="lower" gives 1st, 2nd, 3rd, 41st ... instead.
+    """
     if n is None or n == "":
         return ""
+    lower = str(case).strip().lower() == "lower"
     try:
         n = int(n)
     except (ValueError, TypeError):
-        return str(n).upper()
-    if 10 <= n % 100 <= 20:
+        return str(n).lower() if lower else str(n).upper()
+    if 10 <= n % 100 <= 20:                      # 11th, 12th, 13th (and 14th-20th, which are -th anyway)
         suffix = "th"
     else:
         suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}".upper()
+    text = f"{n}{suffix}"
+    return text if lower else text.upper()
+
+
+def clean_ordinal_case(value):
+    """'lower' / 'small' / 'lowercase' / '1st' -> 'lower'; anything else (or nothing) -> 'upper' (the old behaviour)."""
+    text = str(value or "").strip().lower()
+    return "lower" if text in ("lower", "lowercase", "small", "small_caps", "small letters", "1st") else "upper"
 
 
 def format_speakers(speakers, debate_format):
@@ -164,8 +178,9 @@ SUFFIX_FIELDS = {
     "points": "points", "wins": "points",
     "total_speaker_score": "score", "average_total_speaker_score": "score",
     "average": "average",
+    "rank": "rank",                  # awarding slides: "2ND" -> "2ND BEST EFL SPEAKER"
 }
-SUFFIX_KEYS = ("break", "points", "score", "average")
+SUFFIX_KEYS = ("break", "points", "score", "average", "rank")
 
 
 def clean_suffixes(params):
@@ -693,7 +708,7 @@ class TabbycatAPI:
         return result
 
 
-def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixes=None):
+def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixes=None, ordinal_case="upper"):
     fmt = normalize_format(debate_format)
     headers = headers_for(fmt)
     low, high = FORMAT_CONFIG[fmt]["expected_speakers"]
@@ -808,7 +823,7 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixe
         # otherwise its remark (Capped / Ineligible / Reserve / Withdrawn ...)
         break_rank = bt.get("break_rank")
         is_breaking = break_rank is not None and break_rank != ""
-        break_text = ordinal(break_rank) if is_breaking else remark_label(bt.get("remark"))
+        break_text = ordinal(break_rank, ordinal_case) if is_breaking else remark_label(bt.get("remark"))
 
         row = {"break": break_text, "team": team_name, "code_name": code_name, "speakers": speakers_str,
                "_breaking": is_breaking}
@@ -843,6 +858,7 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixe
         "category_name": category_info.get("name", category_slug) if category_info else category_slug,
         "category_slug": category_slug,
         "debate_format": fmt,
+        "ordinal_case": ordinal_case,
         "columns": headers,
         "team_count": len(rows),
         "breaking_teams": sum(1 for r in rows if r["_breaking"]),
@@ -856,7 +872,7 @@ def export_break_csv(api, category_slug, debate_format, intro_rows=True, suffixe
     return output.getvalue(), None, metadata
 
 
-def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWARD_TOP_N, suffixes=None):
+def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWARD_TOP_N, suffixes=None, ordinal_case="upper"):
     """
     Top speakers of one speaker tab -> CSV with the columns rank, speaker, team, average.
     award_tab: 'open' (main speaker tab) | a speaker-category slug such as 'unioncup' | 'replies' (3v3 / WSDC only).
@@ -960,7 +976,7 @@ def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWAR
         if team_obj:
             team_name = (team_obj.get("short_name") or team_obj.get("long_name") or team_obj.get("reference")
                          or team_obj.get("code_name") or "")
-        rank_text = ordinal(r["group_rank"]) + ("=" if AWARD_MARK_TIES and r["tied"] else "")
+        rank_text = ordinal(r["group_rank"], ordinal_case) + ("=" if AWARD_MARK_TIES and r["tied"] else "")
         out_rows.append({
             "rank": rank_text, "speaker": sp.get("name", ""), "team": team_name,
             "average": format_fixed(r["average"], AWARD_AVG_DECIMALS),
@@ -983,7 +999,7 @@ def export_awards_csv(api, award_tab, debate_format, intro_rows=True, top_n=AWAR
     label = "Reply speakers" if is_reply else (category.get("name") if category else "Open speakers")
     metadata = {
         "export_type": "awards", "tab": tab, "tab_label": label, "standings_path": path,
-        "debate_format": fmt, "columns": headers, "top_n": top_n,
+        "debate_format": fmt, "ordinal_case": ordinal_case, "columns": headers, "top_n": top_n,
         "speakers_in_tab": len(rows), "exported_speakers": len(out_rows),
         "ties_at_cutoff": len(out_rows) > top_n,
         "text_added_to": sorted(suffixes),
@@ -999,13 +1015,14 @@ def run_export(api, params):
     export_type = str(params.get("export_type") or "break").strip().lower()
     intro_rows = _intro_flag(params.get("intro_rows"))
     suffixes = clean_suffixes(params)
+    ordinal_case = clean_ordinal_case(params.get("ordinal_case"))
     fmt = normalize_format(params.get("debate_format", "bp"))
     if export_type in ("awards", "award", "speakers"):
         tab = str(params.get("award_tab") or "open").strip().lower()
-        csv_text, error, meta = export_awards_csv(api, tab, fmt, intro_rows, params.get("top_n") or AWARD_TOP_N, suffixes)
+        csv_text, error, meta = export_awards_csv(api, tab, fmt, intro_rows, params.get("top_n") or AWARD_TOP_N, suffixes, ordinal_case)
         return csv_text, error, meta, f"{re.sub(r'[^a-z0-9_]+', '_', tab) or 'open'}_awards"
     category_slug = str(params.get("category_slug") or "").strip().lower()
-    csv_text, error, meta = export_break_csv(api, category_slug, fmt, intro_rows, suffixes)
+    csv_text, error, meta = export_break_csv(api, category_slug, fmt, intro_rows, suffixes, ordinal_case)
     return csv_text, error, meta, f"{category_slug}_break"
 
 
@@ -1067,6 +1084,8 @@ def _clean_params(source):
         "suffix_points": source.get("suffix_points"),
         "suffix_score": source.get("suffix_score"),
         "suffix_average": source.get("suffix_average"),
+        "suffix_rank": source.get("suffix_rank"),
+        "ordinal_case": source.get("ordinal_case"),
         "suffixes": source.get("suffixes"),
     }
 
