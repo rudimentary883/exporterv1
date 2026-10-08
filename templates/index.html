@@ -195,6 +195,13 @@
             </select>
             <p class="hint">The intro row repeats the rank and the numbers but leaves the team and speaker names blank, so the slides can show the numbers first and reveal the name on the next slide.</p>
 
+            <label for="ordinal_case">Letters in the rank (1ST / 1st)</label>
+            <select name="ordinal_case" id="ordinal_case">
+                <option value="upper" selected>CAPITALS &mdash; 1ST, 2ND, 3RD, 4TH ... 41ST</option>
+                <option value="lower">Small letters &mdash; 1st, 2nd, 3rd, 4th ... 41st</option>
+            </select>
+            <p class="hint">Applies to the break rank and to the speaker rank in the awarding export. The numbers are always right (11th, 12th, 13th, 21st, 41st, 111th ...).</p>
+
             <details style="margin-top:15px;">
                 <summary style="cursor:pointer;font-weight:600;color:#444;">Optional: add text next to the values (for Canva Bulk create)</summary>
                 <p class="hint" style="margin-top:8px;">
@@ -215,6 +222,11 @@
                     <label for="suffix_score">After the speaker score (BP, 3v3: total speaker score &middot; WSDC: average total speaker score)</label>
                     <input type="text" name="suffix_score" id="suffix_score" placeholder="Speaker Points">
                     <p class="hint">1125 &rarr; <code>1125 Speaker Points</code></p>
+                </div>
+                <div id="suffix_rank_group" style="display:none;">
+                    <label for="suffix_rank">After the speaker rank (awarding slides)</label>
+                    <input type="text" name="suffix_rank" id="suffix_rank" placeholder="BEST EFL SPEAKER">
+                    <p class="hint">2ND &rarr; <code>2ND BEST EFL SPEAKER</code></p>
                 </div>
                 <div id="suffix_average_group" style="display:none;">
                     <label for="suffix_average">After the average (awarding slides)</label>
@@ -250,7 +262,9 @@
   "suffix_break": "OPEN BREAKING TEAM",   // optional text added inside the cells (all four optional):
   "suffix_points": "Team Points",         //   points / wins
   "suffix_score": "Speaker Points",       //   total speaker score / average total speaker score
-  "suffix_average": "average speaks"      //   awards: the average
+  "suffix_rank": "BEST EFL SPEAKER",      //   awards: the rank ("2ND BEST EFL SPEAKER")
+  "suffix_average": "average speaks",     //   awards: the average
+  "ordinal_case": "upper"                 // "upper" (1ST) or "lower" (1st)
 }</pre>
         <p class="hint"><code>intro_rows</code> is optional (default <code>true</code>); send <code>false</code> for one row each. For <code>"export_type": "awards"</code> the columns are <code>rank, speaker, team, average</code> and <code>category_slug</code> is not needed. In the break file the Break column holds the break rank, or the remark (Capped, Ineligible, Reserve, Withdrawn) of a team that is not breaking.</p>
     </div>
@@ -275,6 +289,7 @@
             for (const id of ['suffix_break_group', 'suffix_points_group', 'suffix_score_group']) {
                 document.getElementById(id).style.display = awards ? 'none' : '';
             }
+            document.getElementById('suffix_rank_group').style.display = awards ? '' : 'none';
             document.getElementById('suffix_average_group').style.display = awards ? '' : 'none';
             updateColumnsHint();
         }
